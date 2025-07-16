@@ -31,7 +31,7 @@ type Coordinator struct {
 	ReducerToInputFilesMap map[int][]string // maps intermediate files for each reducer task
 
 	WorkerCounter int
-	
+
 	DoneLogPrint bool
 }
 
@@ -101,10 +101,7 @@ func (c *Coordinator) MarkTaskAsCompleted(args *MarkTaskAsCompletedArgs, reply *
 	}
 	args.Task.Status = Completed
 
-	updatedInProgressTasks, err := c.removeTaskFromCollection(c.InProgressTasks, args.Task.TaskNumber)
-	if err != nil {
-		return err
-	}
+	updatedInProgressTasks := c.removeTaskFromCollection(c.InProgressTasks, args.Task.TaskNumber)
 	c.InProgressTasks = updatedInProgressTasks
 	log.Printf("Coordinator marks task %v as completed\n", args.Task.TaskNumber)
 

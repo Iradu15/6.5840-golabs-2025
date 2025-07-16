@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func (c *Coordinator) removeTaskFromCollection(tasks []Task, taskNumber int) ([]Task, error) {
+func (c *Coordinator) removeTaskFromCollection(tasks []Task, taskNumber int) []Task {
 	newTasks := []Task{}
 	alreadyRemoved := false
 
@@ -19,10 +19,10 @@ func (c *Coordinator) removeTaskFromCollection(tasks []Task, taskNumber int) ([]
 		}
 	}
 
-	return newTasks, nil
+	return newTasks
 }
 
-func (c *Coordinator) checkTaskIsContained(tasks []Task, taskNumber int) bool {
+func checkTaskIsContained(tasks []Task, taskNumber int) bool {
 	for _, task := range tasks {
 		if task.TaskNumber == taskNumber {
 			return true
@@ -41,7 +41,7 @@ func (c *Coordinator) checkTaskIsAlreadyCompleted(taskNumber int, taskType TaskT
 	} else {
 		collection = c.CompletedReduceTasks
 	}
-	return c.checkTaskIsContained(collection, taskNumber)
+	return checkTaskIsContained(collection, taskNumber)
 }
 
 func (c *Coordinator) completeMapTask(task Task, fileNames []string) error {
