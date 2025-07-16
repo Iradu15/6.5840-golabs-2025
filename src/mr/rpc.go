@@ -1,57 +1,34 @@
 package mr
 
-//
-// RPC definitions.
-//
-// remember to capitalize all names.
-//
+/*
+	RPC definitions, remember to capitalize all names.
+*/
 
 import (
 	"os"
 	"strconv"
 )
 
-//
-// example to show how to declare the arguments
-// and reply for an RPC.
-//
-
-type ExampleArgs struct {
-	X int
+type EmptyTaskArgs struct {
 }
 
-type ExampleReply struct {
-	Y int
-}
-
-
-type AssignTaskArgs struct{
+type AssignTaskReply struct {
+	Task     Task
 	WorkerId int
 }
 
-type AssignTaskReply struct{
-	Task Task
-	WorkerId int
-}
-
-
-type AskDefaultParametersArgs struct{
-}
-
-type AskDefaultParametersReply struct{
+type AskNReduceReply struct {
 	NReduce int
-	NMap int
 }
 
-
-type MarkTaskAsCompletedArgs struct{
-	Task Task
-	WorkerId int
-	FileNames []string // NReduce for a mapper, one for a reducer
+type MarkTaskAsCompletedArgs struct {
+	Task      Task
+	WorkerId  int
+	FileNames []string // NReduce files for mappers, only one for reducers
 }
 
-type MarkTaskAsCompletedReply struct{
-	OK bool
+type MarkTaskAsCompletedReply struct {
+	OK  bool
 	Err string
 }
 
