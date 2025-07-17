@@ -2,12 +2,23 @@ package main
 
 /*
 	Modify the Crawl function to fetch URLs in parallel without fetching the same URL twice.
-	Hint: you can keep a cache of the URLs that have been fetched on a map, but maps alone are not safe for concurrent use! 
+	Hint: you can keep a cache of the URLs that have been fetched on a map, but maps alone are not safe for concurrent use!
 */
 
 import (
 	"fmt"
+	"sync"
+	"time"
 )
+
+func contains(url string, cache []string) bool {
+	for _, u := range cache {
+		if u == url {
+			return true
+		}
+	}
+	return false
+}
 
 type Fetcher interface {
 	// Fetch returns the body of URL and
@@ -17,7 +28,7 @@ type Fetcher interface {
 
 // Crawl uses fetcher to recursively crawl
 // pages starting with url, to a maximum of depth.
-func Crawl(url string, depth int, fetcher Fetcher) {
+func Crawl(url string, depth int, fetcher Fetcher, mutex *sync.Mutex, cache *[]string) {
 	// TODO: Fetch URLs in parallel.
 	// TODO: Don't fetch the same URL twice.
 	// This implementation doesn't do either:
@@ -29,15 +40,26 @@ func Crawl(url string, depth int, fetcher Fetcher) {
 		fmt.Println(err)
 		return
 	}
+
 	fmt.Printf("found: %s %q\n", url, body)
+	mutex.Lock()
+	*cache = append(*cache, url)
+	fmt.Printf("Added %v to cache: %v\n", url, cache)
+
 	for _, u := range urls {
-		Crawl(u, depth-1, fetcher)
+
+		ans := contains(u, *cache)
+		if !ans {
+			go Crawl(u, depth-1, fetcher, mutex, cache)
+		}
 	}
+	mutex.Unlock()
+	time.Sleep(10 * time.Second)
 	return
 }
 
 func main() {
-	Crawl("https://golang.org/", 4, fetcher)
+	Crawl("https://golang.org/", 4, fetcher, &mutex, &cache)
 }
 
 // fakeFetcher is Fetcher that returns canned results.
@@ -54,6 +76,10 @@ func (f fakeFetcher) Fetch(url string) (string, []string, error) {
 	}
 	return "", nil, fmt.Errorf("not found: %s", url)
 }
+
+// cache that stores the fetched urls
+var cache = []string{}
+var mutex sync.Mutex
 
 // fetcher is a populated fakeFetcher.
 var fetcher = fakeFetcher{
