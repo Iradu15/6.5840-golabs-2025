@@ -1,24 +1,9 @@
 package main
 
-/*
-	Modify the Crawl function to fetch URLs in parallel without fetching the same URL twice.
-	Hint: you can keep a cache of the URLs that have been fetched on a map, but maps alone are not safe for concurrent use!
-*/
-
 import (
 	"fmt"
 	"sync"
-	"time"
 )
-
-func contains(url string, cache []string) bool {
-	for _, u := range cache {
-		if u == url {
-			return true
-		}
-	}
-	return false
-}
 
 type Fetcher interface {
 	// Fetch returns the body of URL and
@@ -28,38 +13,51 @@ type Fetcher interface {
 
 // Crawl uses fetcher to recursively crawl
 // pages starting with url, to a maximum of depth.
-func Crawl(url string, depth int, fetcher Fetcher, mutex *sync.Mutex, cache *[]string) {
+func Crawl(url string, depth int, fetcher Fetcher, mutex *sync.Mutex, cache *map[string]bool, ch chan int) {
 	// TODO: Fetch URLs in parallel.
 	// TODO: Don't fetch the same URL twice.
-	// This implementation doesn't do either:
+
+	defer func() { ch <- 1 }() // can do this instead of ch <- 1 for each return
 	if depth <= 0 {
+		//ch <- 1
 		return
 	}
+
+	mutex.Lock()
+	if (*cache)[url] {
+		mutex.Unlock()
+		//ch <- 1
+		return
+	}
+	(*cache)[url] = true
+	mutex.Unlock()
+
 	body, urls, err := fetcher.Fetch(url)
 	if err != nil {
 		fmt.Println(err)
+		//ch <- 1
 		return
 	}
-
 	fmt.Printf("found: %s %q\n", url, body)
-	mutex.Lock()
-	*cache = append(*cache, url)
-	fmt.Printf("Added %v to cache: %v\n", url, cache)
 
+	channels := []chan int{}
 	for _, u := range urls {
-
-		ans := contains(u, *cache)
-		if !ans {
-			go Crawl(u, depth-1, fetcher, mutex, cache)
-		}
+		chAux := make(chan int)
+		channels = append(channels, chAux)
+		go Crawl(u, depth-1, fetcher, mutex, cache, chAux)
 	}
-	mutex.Unlock()
-	time.Sleep(10 * time.Second)
+
+	// wait for child processes to finish
+	for _, ch := range channels {
+		<-ch
+	}
+	//ch <- 1
 	return
 }
 
 func main() {
-	Crawl("https://golang.org/", 4, fetcher, &mutex, &cache)
+	ch := make(chan int, 1)
+	Crawl("https://golang.org/", 4, fetcher, &mutex, &cache, ch)
 }
 
 // fakeFetcher is Fetcher that returns canned results.
@@ -78,7 +76,7 @@ func (f fakeFetcher) Fetch(url string) (string, []string, error) {
 }
 
 // cache that stores the fetched urls
-var cache = []string{}
+var cache = map[string]bool{}
 var mutex sync.Mutex
 
 // fetcher is a populated fakeFetcher.
