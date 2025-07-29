@@ -38,24 +38,27 @@ func (lk *Lock) Acquire() {
 		}
 
 		err := lk.ck.Put(lk.sharedKey, lk.id, version)
-		if err != rpc.OK{
-			time.Sleep(10 * time.Millisecond)
-			continue
+		if err == rpc.OK {
+			return
 		}
-		
-		break
+
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
 func (lk *Lock) Release() {
 	for {
-		_, version, _ := lk.ck.Get(lk.sharedKey)
-		err := lk.ck.Put(lk.sharedKey, "", version)
-		if err != rpc.OK{
-			time.Sleep(5 * time.Millisecond)
-			continue
+		val, version, _ := lk.ck.Get(lk.sharedKey)
+		if val != lk.id {
+			log.Printf("client %s tried to release lock owned by %s", lk.id, val)
+			return
 		}
-		
-		break
+
+		err := lk.ck.Put(lk.sharedKey, "", version)
+		if err == rpc.OK {
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
 	}
 }
