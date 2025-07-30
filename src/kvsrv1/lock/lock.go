@@ -49,6 +49,7 @@ func (lk *Lock) Release() {
 	for {
 		val, version, _ := lk.ck.Get(lk.sharedKey)
 		if val != lk.id {
+			// check [1] below for details
 			log.Printf("client %s tried to release lock owned by %s", lk.id, val)
 			return
 		}
@@ -61,3 +62,18 @@ func (lk *Lock) Release() {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+/*
+	[1]
+
+	Besides the reason that a thread that does NOT hold the lock tries to release it, check can pass
+	for following scenario:
+		Single thread (t) scenario.
+		1. t acquires lock successfully
+		2. t issues release GET and receives reply
+		3. t issues release PUT and gets errMaybe because first try succeeded but due to network it did NOT get reply,
+		   then the second retry, it failed with rpc.errVersion because the first try succeeded.
+		4. t sleeps and retries releasing the lock (from step 2). t issues release GET and received value is "" because
+		   the first PUT succeeded.
+		5. Fortunately, it exits and this is good because t already release the thread successfully.
+*/
