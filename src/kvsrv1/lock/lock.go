@@ -32,6 +32,9 @@ func MakeLock(ck kvtest.IKVClerk, l string) *Lock {
 func (lk *Lock) Acquire() {
 	for {
 		val, version, _ := lk.ck.Get(lk.sharedKey)
+		if val == lk.id {
+			return
+		}
 		if val != "" {
 			time.Sleep(10 * time.Millisecond)
 			continue
