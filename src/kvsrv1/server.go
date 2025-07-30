@@ -64,16 +64,16 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	tuple, ok := kv.keyValueMap[args.Key]
 
 	if !ok && args.Version != 0 {
-		reply.Err = rpc.Err(rpc.ErrNoKey)
+		reply.Err = rpc.ErrNoKey
 		return
 	}
 
 	if ok && args.Version != tuple.Version {
-		reply.Err = rpc.Err(rpc.ErrVersion)
+		reply.Err = rpc.ErrVersion
 		return
 	}
 
-	reply.Err = rpc.Err(rpc.OK)
+	reply.Err = rpc.OK
 	kv.keyValueMap[args.Key] = ValueVersionPair{Value: args.Value, Version: tuple.Version + 1}
 }
 
