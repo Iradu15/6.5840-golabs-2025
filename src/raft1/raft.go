@@ -75,35 +75,76 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	/*
-		Handler for receiving AppendEntryRequest (HeartBeat included) from leader
+		Handler for receiving AppendEntryRequest (HeartBeat included) from leader.
+		More documentation below at [2]
 	*/
 	rf.mu.Lock()
-	currentTerm := rf.currentTerm
-	lastLogIndex := rf.getLastLogIndex()
-	entries := rf.log
+	defer rf.mu.Unlock()
 
-	reply.Term = currentTerm
+	reply.Term = rf.currentTerm
 	reply.Success = false
 
-	// !!! does it accept heartbeat without checking if it is from the leader?
-	if len(entries) == 0 {
-		fmt.Printf("%v received heartbeat from %v", rf.me, args.LeaderId)
-		// reset timer
-		rf.lastAppend = time.Now()
-
-		rf.mu.Unlock()
+	// reject appendEntry request (Fig2): requester is behind term wise
+	if rf.currentTerm > args.Term {
 		return
 	}
 
-	rf.mu.Unlock()
-
-	if moreUpToDate(args.Term, args.PrevLogIndex, currentTerm, lastLogIndex) {
-		rf.lastAppend = time.Now()
-		rf.currentTerm = args.Term //Fig2: Rules for Servers: All Servers
-		rf.changeState(Follower)   //Fig2: Rules for Servers: All Servers
-		reply.Success = true
+	/*
+		update term + reset votedFor. Also assure node is in Follower state
+		= is needed in condition check to change state to Follower if node is candidate but
+		another node wins in the same term.
+	*/
+	if args.Term >= rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.changeState(Follower)
 	}
 
+	/*
+		even though node might not append now (ex: enters next if),
+		it heard from leader, so timer should be reset
+	*/
+	rf.lastAppend = time.Now()
+
+	if args.PrevLogIndex >= len(rf.log) {
+		return
+	}
+
+	// mismatch between logs
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		return
+	}
+
+	reply.Success = true
+
+	// update log entries
+	startIndex := args.PrevLogIndex + 1
+
+	remainingLen := len(rf.log) - startIndex
+	lenArgsEntries := len(args.Entries)
+
+	for index := range min(remainingLen, lenArgsEntries) {
+
+		entry := rf.log[startIndex+index]
+		argEntry := args.Entries[index]
+
+		// discard everything and append rest of logs from args
+		if entry != argEntry {
+			rf.log = append(rf.log[:startIndex+index], args.Entries[index:]...)
+			lenArgsEntries = 0			
+			break
+		}
+	}
+
+	// append possible remaining elements from args
+	if lenArgsEntries > remainingLen {
+		remainingElements := args.Entries[remainingLen:]
+		rf.log = append(rf.log, remainingElements...)
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -207,7 +248,7 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 
 	} else {
 		// Decrements nextIndex for peer and retry the AppendEntries RPC next time the ticker fires until logs match
-		rf.nextIndex[peer] = max(1, prevLogIndex - 1)
+		rf.nextIndex[peer] = max(1, prevLogIndex-1)
 	}
 
 	rf.mu.Unlock()
@@ -314,6 +355,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3A, 3B, 3C).
 	rf.majority = len(peers)/2 + 1
+
 	rf.currentTerm = 1
 	rf.electionTimeout = 150 + (rand.Int() % 150) // 5.2: between [150, 300]
 	rf.votedFor = -1
@@ -321,6 +363,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastAppend = time.Now()
 	rf.lastHeartBeatSent = time.Now()
 	rf.heartBeatInterval = 100
+	rf.log = append(rf.log, LogEntry{Term: 0})
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -466,4 +509,25 @@ func (rf *Raft) killed() bool {
 	and it will remain that way for the rest of the term.
 
 	[2]
+	The leader decides when it is safe to apply a log entry to the state machines;
+	such an entry is called committed.
+	A log entry is committed once the leader that created the entry has replicated it on a majority of the servers.
+	Once a follower learns that a log entry is committed, it applies the entry to its local
+	state machine (in log order).
+
+	When sending an AppendEntries RPC, the leader includes the index
+	and term of the entry in its log that immediately precedes
+	the new entries. If the follower does not find an entry in
+	its log with the same index and term, then it refuses the
+	new entries.
+
+	In Raft, the leader handles inconsistencies by forcing
+	the followers’ logs to duplicate its own:
+		To bring a follower’s log into consistency with its own,
+		the leader must find the latest log entry where the two
+		logs agree, delete any entries in the follower’s log after
+		that point, and send the follower all of the leader’s entries
+		after that point.
+
+
 */

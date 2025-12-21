@@ -41,8 +41,15 @@ const (
 	Leader
 )
 
+/*
+5.3:
 
-type LogEntry struct{
+	Each log entry stores a state machine command along with the term number
+	when the entry was received by the leader.
+	Each log entry also has an integer index identifying its position in the log.
+*/
+type LogEntry struct {
 	Command interface{}
-	Term int
+	Term    int
+	Index   int // relevant? I dont think so, can be taken from the entries
 }
