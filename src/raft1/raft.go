@@ -49,9 +49,10 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
+
+	votesReceived int
 }
 
-// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
@@ -61,15 +62,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 
 	// if already granted vote or the candidate is not more up to date, deny vote
-	if rf.votedFor != -1 || !moreUpToDate(args.Term, args.LastLogIndex, rf.currentTerm, rf.getLastLogIndex()) {
+	if rf.votedFor != -1 || args.Term < rf.currentTerm || !rf.moreUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		return
 	}
 
-	// reset timer
 	rf.lastAppend = time.Now()
 	rf.votedFor = args.CandidateId
-	rf.currentTerm = args.Term //Fig2: Rules for Servers: All Servers
-	rf.changeState(Follower)   //Fig2: Rules for Servers: All Servers
+	rf.currentTerm = args.Term
+	rf.changeState(Follower)
 	reply.VoteGranted = true
 }
 
@@ -131,7 +131,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		// discard everything and append rest of logs from args
 		if entry != argEntry {
 			rf.log = append(rf.log[:startIndex+index], args.Entries[index:]...)
-			lenArgsEntries = 0			
+			lenArgsEntries = 0
 			break
 		}
 	}
@@ -202,7 +202,7 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 		return
 	}
 
-	nextIndex := rf.getPrevLogIndex(peer)
+	nextIndex := rf.getNextLogIndex(peer)
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
 	entries := rf.log[prevLogIndex:]
@@ -225,24 +225,19 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 	replySuccess := reply.Success
 	replyTerm := reply.Term
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if replyTerm > term {
 		// step down and convert back to follower
-		rf.mu.Lock()
-
-		rf.changeState(Follower)
-		rf.currentTerm = replyTerm
-		rf.votedFor = -1 // always when update term, votedFor gets -1
-
-		rf.mu.Unlock()
+		rf.stepDown(replyTerm)
 		return
 	}
-
-	rf.mu.Lock()
 
 	if replySuccess {
 		// Update matchIndex to what we just sent
 		// Update nextIndex to matchIndex + 1
-		newMatchIndex := args.PrevLogIndex + len(args.Entries)
+		newMatchIndex := prevLogIndex + len(entries)
 		rf.matchIndex[peer] = newMatchIndex
 		rf.nextIndex[peer] = newMatchIndex + 1
 
@@ -250,8 +245,84 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 		// Decrements nextIndex for peer and retry the AppendEntries RPC next time the ticker fires until logs match
 		rf.nextIndex[peer] = max(1, prevLogIndex-1)
 	}
+}
+
+func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogTerm int, candidateId int) {
+	/*
+		Handle request for vote and response from peer
+	*/
+
+	rf.mu.Lock()
+
+	if rf.state != Candidate {
+		/*
+			What if when issuing request votes you receive higher term and step down,
+			you need to check for the following ones that you are still candidate
+		*/
+		rf.mu.Unlock()
+		return
+	}
 
 	rf.mu.Unlock()
+
+	args := RequestVoteArgs{term, candidateId, lastLogIndex, lastLogTerm}
+	reply := RequestVoteReply{}
+
+	ok := rf.sendRequestVote(peer, &args, &reply)
+
+	if !ok {
+		// peer did not respond
+		return
+	}
+
+	voteGranted := reply.VoteGranted
+	replyTerm := reply.Term
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if replyTerm > term {
+		// step down and convert back to follower
+		rf.stepDown(replyTerm)
+		return
+	}
+
+	if !voteGranted {
+		return
+	}
+
+	rf.votesReceived += 1
+	if rf.votesReceived >= rf.majority {
+		fmt.Printf("%v became leader in term %v", candidateId, term)
+		rf.changeState(Leader)
+	}
+
+}
+
+func (rf *Raft) startElection(term int) {
+	rf.mu.Lock()
+
+	fmt.Printf("%v started election with term %v\n", rf.me, term)
+
+	rf.changeState(Candidate)
+
+	rf.votedFor = rf.me
+	rf.votesReceived = 1
+
+	lastLogIndex := rf.getLastLogIndex()
+	lastLogTerm := rf.getLastLogTerm()
+	candidateId := rf.me
+
+	rf.mu.Unlock()
+
+	for peerId := range rf.peers {
+
+		if peerId == candidateId {
+			continue
+		}
+
+		go rf.handleRequestVote(peerId, term, lastLogIndex, lastLogTerm, candidateId)
+	}
 }
 
 func (rf *Raft) ticker() {
@@ -270,13 +341,21 @@ func (rf *Raft) ticker() {
 
 			// needed not to spam with a lot of goroutines that send heartbeat
 			if rf.timePassedSince(rf.lastHeartBeatSent) > time.Duration(rf.heartBeatInterval) {
+
 				rf.lastHeartBeatSent = time.Now()
 				commitIndex := rf.commitIndex
 				leaderId := rf.me
 
 				rf.mu.Unlock()
 
-				for peerId, _ := range rf.peers {
+				fmt.Printf("%v is sending heart beats...'n", leaderId)
+
+				for peerId := range rf.peers {
+
+					if peerId == leaderId {
+						continue
+					}
+
 					go rf.handleHeartBeat(peerId, currentTerm, leaderId, commitIndex)
 				}
 
@@ -284,17 +363,18 @@ func (rf *Raft) ticker() {
 			}
 
 			rf.mu.Unlock()
-			fmt.Printf("%v is Leader ...", rf.me)
 			continue
 		}
 
-		if rf.timePassedSince(rf.lastAppend) > time.Duration(rf.electionTimeout) {
+		// More documentation below at [3]
+		if rf.timePassedSince(rf.lastAppend) > time.Duration(rf.electionTimeout * int(time.Millisecond)) {
 			/*
 				update timer here (not in startElection) because go goroutine() schedules it,
 				not starts it, what if queue is big, the goroutine might not start and the election
 				timeout passes again and the timer is not updated in the goroutine
 			*/
 			rf.lastAppend = time.Now()
+			rf.currentTerm += 1
 			currentTerm := rf.currentTerm
 
 			rf.mu.Unlock()
@@ -302,39 +382,9 @@ func (rf *Raft) ticker() {
 			go rf.startElection(currentTerm)
 			continue
 		}
+
 		rf.mu.Unlock()
-
-		/*
-
-			electionTimer should be reset just when:
-			1. Append entry from a leader which has >= term.
-			2. Vote is actually granted to another candidate.
-			3. Starting a new election as a candidate.
-
-			select{
-
-				case <- valid appendEntry(heartbeat or data)
-
-				case <- granting (NOT just receiving a request vote)!!! IMPORTANT
-						because outdated candidates (with different term, outdated log) can still
-						call and timer is going to be reset even though they will never win the election.
-						This will increase leader election process and raft is unavailable for longer period of time.
-						https://github.com/nats-io/nats-server/discussions/5023
-
-						also Fig2: Rules for Servers: Followers
-
-				case <-time.After(rf.ElectionTimeout):
-					start New election
-			}
-		*/
-
 	}
-}
-
-func (rf *Raft) startElection(term int) {
-	/*
-
-	 */
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -358,6 +408,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.currentTerm = 1
 	rf.electionTimeout = 150 + (rand.Int() % 150) // 5.2: between [150, 300]
+
 	rf.votedFor = -1
 	rf.state = Follower
 	rf.lastAppend = time.Now()
@@ -529,5 +580,26 @@ func (rf *Raft) killed() bool {
 		that point, and send the follower all of the leader’s entries
 		after that point.
 
+	[3]
+	electionTimer should be reset just when:
+		1. Append entry from a leader which has >= term.
+		2. Vote is actually granted to another candidate.
+		3. Starting a new election as a candidate.
+
+		select{
+
+			case <- valid appendEntry(heartbeat or data)
+
+			case <- granting (NOT just receiving a request vote)!!! IMPORTANT
+					because outdated candidates (with different term, outdated log) can still
+					call and timer is going to be reset even though they will never win the election.
+					This will increase leader election process and raft is unavailable for longer period of time.
+					https://github.com/nats-io/nats-server/discussions/5023
+
+					also Fig2: Rules for Servers: Followers
+
+			case <-time.After(rf.ElectionTimeout):
+				start New election
+		}
 
 */

@@ -15,32 +15,38 @@ func DPrintf(format string, a ...interface{}) {
 }
 
 func (rf *Raft) getLastLogIndex() int {
-	/*
-		To be implemented
-	*/
-	return 0
+	entries := rf.log
+	lastLogIndex := len(entries) - 1
+
+	return lastLogIndex
 }
 
 func (rf *Raft) getLastLogTerm() int {
-	/*
-		To be implemented
-	*/
-	return 0
+	entries := rf.log
+	lastLog := entries[len(entries)-1]
+	lastLogTerm := lastLog.Term
+
+	return lastLogTerm
 }
 
 func (rf *Raft) getLogTermForIndex(index int) int {
-	/*
-		To be implemented
-	*/
-	return 0
+	entries := rf.log
+
+	if index < 0 || index > len(entries)-1 {
+		return -1
+	}
+
+	indexEntry := entries[index]
+	term := indexEntry.Term
+
+	return term
 }
 
-func (rf *Raft) getPrevLogIndex(peer int) int {
+func (rf *Raft) getNextLogIndex(peer int) int {
 	return rf.nextIndex[peer]
 }
 
-
-func moreUpToDate(requesterTerm int, requesterIndex int, currentTerm int, lastLogIndex int) bool {
+func (rf *Raft) moreUpToDate(requesterLastLogIndex int, requesterLastLogTerm int) bool {
 	/*
 		Check if candidate is more up to date than current server.
 		Up to date = comparing the index and term of the last entries.
@@ -54,14 +60,31 @@ func moreUpToDate(requesterTerm int, requesterIndex int, currentTerm int, lastLo
 		more up-to-date
 	*/
 
-	if requesterTerm > currentTerm {
-		return true
-	} else if requesterTerm == currentTerm {
-		return requesterIndex >= lastLogIndex
-	} else {
-		return false
+	lastLogTerm := rf.getLastLogTerm()
+	lastLogIndex := rf.getLastLogIndex()
+
+	if lastLogTerm == requesterLastLogTerm {
+		return requesterLastLogIndex > lastLogIndex
 	}
+
+	return requesterLastLogTerm > lastLogTerm
+
 }
+
+func (rf *Raft) atLeastUpToDate(requesterLastLogIndex int, requesterLastLogTerm int) bool {
+	/*
+		Extension of moreUpToDate
+	*/
+	lastLogTerm := rf.getLastLogTerm()
+	lastLogIndex := rf.getLastLogIndex()
+
+	if lastLogTerm == requesterLastLogTerm {
+		return requesterLastLogIndex >= lastLogIndex
+	}
+
+	return requesterLastLogTerm >= lastLogTerm
+}
+
 
 func (rf *Raft) changeState(newState State) {
 	rf.state = newState
@@ -77,4 +100,13 @@ func (rf *Raft) GetState() (int, bool) {
 
 func (rf *Raft) timePassedSince(lastEventTime time.Time) time.Duration {
 	return time.Since(lastEventTime)
+}
+
+func (rf *Raft) stepDown(replyTerm int) {
+	/*
+		Convert to follower, update currentTerm and reset voted for
+	*/
+	rf.changeState(Follower)
+	rf.currentTerm = replyTerm
+	rf.votedFor = -1 // always when update term, votedFor gets -1
 }
