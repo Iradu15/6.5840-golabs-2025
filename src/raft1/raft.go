@@ -86,20 +86,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// if already granted vote (terms are equal, if higher would have granted, if lower would have rejected), deny vote
 	if rf.votedFor != -1 {
-        fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Already voted for S%d)\n", 
-            rf.me, rf.currentTerm, args.CandidateId, rf.votedFor)
+		fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Already voted for S%d)\n",
+			rf.me, rf.currentTerm, args.CandidateId, rf.votedFor)
 
-        return
-    }
+		return
+	}
 
 	if !rf.moreUpToDate(args.LastLogIndex, args.LastLogTerm) {
-        fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Cand=[%d/T%d] vs Me=[%d/T%d])\n",
-            rf.me, rf.currentTerm, args.CandidateId,
-            args.LastLogIndex, args.LastLogTerm,
-            rf.getLastLogIndex(), rf.getLastLogTerm())
-     
+		fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Cand=[%d/T%d] vs Me=[%d/T%d])\n",
+			rf.me, rf.currentTerm, args.CandidateId,
+			args.LastLogIndex, args.LastLogTerm,
+			rf.getLastLogIndex(), rf.getLastLogTerm())
+
 		return
-    }
+	}
 
 	fmt.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
 
@@ -123,6 +123,9 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 
 	// reject appendEntry request (Fig2): requester is behind term wise
 	if rf.currentTerm > args.Term {
+		fmt.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (Leader Term %d < My Term %d)\n",
+			rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.currentTerm)
+
 		return
 	}
 
@@ -150,11 +153,17 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 	rf.lastAppend = time.Now()
 
 	if args.PrevLogIndex >= len(rf.log) {
+		fmt.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
+			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, len(rf.log))
+
 		return
 	}
 
 	// mismatch between logs
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		fmt.Printf("[AppendEntryReject] S%d T%d: Rejected S%d at Index %d (Have Term %d, Leader Expects %d)\n",
+			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, rf.log[args.PrevLogIndex].Term, args.PrevLogTerm)
+
 		return
 	}
 
@@ -262,6 +271,8 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 			another goroutine will be scheduled to retry for the same peer, and so on
 			=> lots of goroutines trying to reach same peer
 		*/
+		fmt.Printf("[HeartBeatError] %v did not respond to heartbeat from %v \n", peer, leaderId)
+
 		return
 	}
 
@@ -273,7 +284,10 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 
 	if replyTerm > term {
 		// step down and convert back to follower
+		fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", leaderId, term, peer, replyTerm)
+
 		rf.stepDown(replyTerm)
+
 		return
 	}
 
@@ -281,17 +295,24 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 		// Update matchIndex to what we just sent
 		// Update nextIndex to matchIndex + 1
 		newMatchIndex := prevLogIndex + len(entries)
+
 		rf.matchIndex[peer] = newMatchIndex
 		rf.nextIndex[peer] = newMatchIndex + 1
 
 	} else {
 		// Decrements nextIndex for peer and retry the AppendEntries RPC next time the ticker fires until logs match
+
+		fmt.Printf(
+			"[LogBackoff] S%d T%d: S%d rejected AppendEntries at PrevLogIndex %d. Decrement NextIndex from %d to %d\n",
+			leaderId, term, peer, prevLogIndex, prevLogIndex, prevLogIndex-1)
+
 		rf.nextIndex[peer] = max(1, prevLogIndex-1)
 	}
 }
 
 func (rf *Raft) becomeLeader() {
-	fmt.Printf("%v became leader in term %v\n", rf.me, rf.currentTerm)
+	fmt.Printf("[Leader] S%d T%d: Won election and became Leader \n", rf.me, rf.currentTerm)
+
 	rf.changeState(Leader)
 
 	// reinitialize arrays Fig2: State
@@ -330,6 +351,8 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 
 	if !ok {
 		// peer did not respond
+		fmt.Printf("[RequestVoteError] %v did not respond to request vote from %v \n", peer, candidateId)
+
 		return
 	}
 
@@ -342,14 +365,34 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 	if replyTerm > term {
 		// step down and convert back to follower
 		rf.stepDown(replyTerm)
+
+		fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", candidateId, term, peer, replyTerm)
+
 		return
 	}
 
 	if !voteGranted {
+		fmt.Printf(
+			"[VoteDenied] S%d T%d: Peer S%d denied (ReplyTerm: %d)\n",
+			candidateId,
+			rf.currentTerm,
+			peer,
+			reply.Term,
+		)
+
 		return
 	}
 
+	fmt.Printf(
+		"[VoteReceived] S%d T%d: Peer S%d granted vote (Total: %d)\n",
+		candidateId,
+		rf.currentTerm,
+		peer,
+		rf.votesReceived,
+	)
+
 	rf.votesReceived += 1
+
 	if rf.votesReceived >= rf.majority {
 		rf.becomeLeader()
 	}
@@ -358,7 +401,7 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 func (rf *Raft) startElection(term int) {
 	rf.mu.Lock()
 
-	fmt.Printf("%v started election with term %v\n", rf.me, term)
+	fmt.Printf("[ElectionStarted] S%v T%v \n", rf.me, rf.currentTerm)
 
 	rf.changeState(Candidate)
 
@@ -370,6 +413,8 @@ func (rf *Raft) startElection(term int) {
 	candidateId := rf.me
 
 	rf.mu.Unlock()
+
+	fmt.Printf("[VoteSend] S%d T%d: started issuing request Votes\n", candidateId, rf.currentTerm)
 
 	for peerId := range rf.peers {
 
@@ -391,6 +436,8 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 		rf.mu.Lock()
+
+		rf.electionTimeout = 250 + (rand.Int() % 250) // 5.2: example
 
 		if rf.state == Leader {
 			currentTerm := rf.currentTerm
@@ -461,7 +508,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.majority = len(peers)/2 + 1
 
 	rf.currentTerm = 1
-	rf.electionTimeout = 150 + (rand.Int() % 150) // 5.2: between [150, 300]
 
 	rf.votedFor = -1
 	rf.state = Follower

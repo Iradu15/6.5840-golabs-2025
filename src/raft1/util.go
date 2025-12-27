@@ -33,7 +33,7 @@ func (rf *Raft) getLogTermForIndex(index int) int {
 	entries := rf.log
 
 	if index < 0 || index > len(entries)-1 {
-		return -1
+		return 0
 	}
 
 	indexEntry := entries[index]
