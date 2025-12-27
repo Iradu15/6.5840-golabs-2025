@@ -95,6 +95,9 @@ func (rf *Raft) GetState() (int, bool) {
 		Return currentTerm and whether this server believes it is the leader.
 	*/
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
 	return rf.currentTerm, rf.state == Leader
 }
 

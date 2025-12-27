@@ -508,12 +508,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.majority = len(peers)/2 + 1
 
 	rf.currentTerm = 1
-
 	rf.votedFor = -1
 	rf.state = Follower
+
 	rf.lastAppend = time.Now()
 	rf.lastHeartBeatSent = time.Now()
 	rf.heartBeatInterval = 100
+	
 	rf.log = append(rf.log, LogEntry{Term: 0})
 
 	// initialize from state persisted before a crash
