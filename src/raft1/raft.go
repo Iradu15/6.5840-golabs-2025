@@ -61,10 +61,47 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
 
-	// if already granted vote or the candidate is not more up to date, deny vote
-	if rf.votedFor != -1 || args.Term < rf.currentTerm || !rf.moreUpToDate(args.LastLogIndex, args.LastLogTerm) {
+	// Fig2: RequestVote RPC: rule 1
+	if rf.currentTerm > args.Term {
+		fmt.Printf("%v rejected request vote from %v due to lower term \n", rf.me, args.CandidateId)
 		return
 	}
+
+	// Update term Fig2: Rules for Servers
+	if args.Term > rf.currentTerm {
+		rf.lastAppend = time.Now()
+		rf.stepDown(args.Term)
+	}
+
+	// Fig2: RequestVote RPC: rule 2
+	if (rf.votedFor == args.CandidateId || rf.votedFor == -1) &&
+		rf.atLeastUpToDate(args.LastLogIndex, args.LastLogTerm) {
+
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
+
+		fmt.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
+		return
+	}
+
+	// if already granted vote (terms are equal, if higher would have granted, if lower would have rejected), deny vote
+	if rf.votedFor != -1 {
+        fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Already voted for S%d)\n", 
+            rf.me, rf.currentTerm, args.CandidateId, rf.votedFor)
+
+        return
+    }
+
+	if !rf.moreUpToDate(args.LastLogIndex, args.LastLogTerm) {
+        fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Cand=[%d/T%d] vs Me=[%d/T%d])\n",
+            rf.me, rf.currentTerm, args.CandidateId,
+            args.LastLogIndex, args.LastLogTerm,
+            rf.getLastLogIndex(), rf.getLastLogTerm())
+     
+		return
+    }
+
+	fmt.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
 
 	rf.lastAppend = time.Now()
 	rf.votedFor = args.CandidateId
@@ -73,7 +110,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 }
 
-func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
+func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 	/*
 		Handler for receiving AppendEntryRequest (HeartBeat included) from leader.
 		More documentation below at [2]
@@ -97,7 +134,13 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	if args.Term >= rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		rf.changeState(Follower)
+
+		if rf.state != Follower {
+			rf.changeState(Follower)
+
+			fmt.Printf("%v is stepping down (heartbeat) due to %v", args.LeaderId, rf.me)
+			fmt.Printf("(%v vs %v)\n", rf.currentTerm, args.Term)
+		}
 	}
 
 	/*
@@ -247,11 +290,26 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 	}
 }
 
+func (rf *Raft) becomeLeader() {
+	fmt.Printf("%v became leader in term %v\n", rf.me, rf.currentTerm)
+	rf.changeState(Leader)
+
+	// reinitialize arrays Fig2: State
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+
+	lastLogIndex := rf.getLastLogIndex()
+
+	for i := range rf.peers {
+		rf.nextIndex[i] = max(1, lastLogIndex)
+		rf.matchIndex[i] = 0
+	}
+}
+
 func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogTerm int, candidateId int) {
 	/*
 		Handle request for vote and response from peer
 	*/
-
 	rf.mu.Lock()
 
 	if rf.state != Candidate {
@@ -293,10 +351,8 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 
 	rf.votesReceived += 1
 	if rf.votesReceived >= rf.majority {
-		fmt.Printf("%v became leader in term %v", candidateId, term)
-		rf.changeState(Leader)
+		rf.becomeLeader()
 	}
-
 }
 
 func (rf *Raft) startElection(term int) {
@@ -347,8 +403,6 @@ func (rf *Raft) ticker() {
 				leaderId := rf.me
 
 				rf.mu.Unlock()
-
-				fmt.Printf("%v is sending heart beats...'n", leaderId)
 
 				for peerId := range rf.peers {
 
