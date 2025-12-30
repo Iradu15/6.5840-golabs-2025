@@ -141,8 +141,13 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		if rf.state != Follower {
 			rf.changeState(Follower)
 
-			fmt.Printf("%v is stepping down (heartbeat) due to %v", args.LeaderId, rf.me)
-			fmt.Printf("(%v vs %v)\n", rf.currentTerm, args.Term)
+			fmt.Printf(
+				"[StepDown (heartbeat)] S%vT%v steps down due to S%vT%v\n",
+				rf.me,
+				rf.currentTerm,
+				args.LeaderId,
+				args.Term,
+			)
 		}
 	}
 
@@ -428,9 +433,6 @@ func (rf *Raft) startElection(term int) {
 
 func (rf *Raft) ticker() {
 	for !rf.killed() {
-
-		// Your code here (3A)
-		// Check if a leader election should be started.
 
 		ms := 50 //50 + (rand.Int63() % 10)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
