@@ -51,6 +51,8 @@ type Raft struct {
 	matchIndex []int
 
 	votesReceived int
+
+	replicateCount int
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -139,12 +141,14 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.votedFor = -1
 
 		if rf.state != Follower {
+
 			rf.changeState(Follower)
 
 			fmt.Printf(
-				"[StepDown (heartbeat)] S%vT%v steps down due to S%vT%v\n",
+				"[ConvertToFollower (heartbeat)] S%vT%v steps down from %v due to S%vT%v\n",
 				rf.me,
 				rf.currentTerm,
+				rf.state,
 				args.LeaderId,
 				args.Term,
 			)
@@ -185,18 +189,32 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		entry := rf.log[startIndex+index]
 		argEntry := args.Entries[index]
 
-		// discard everything and append rest of logs from args
-		if entry != argEntry {
-			rf.log = append(rf.log[:startIndex+index], args.Entries[index:]...)
-			lenArgsEntries = 0
-			break
+		if entry == argEntry {
+			continue
 		}
+
+		// discard everything and append rest of logs from args
+		rf.log = append(rf.log[:startIndex+index], args.Entries[index:]...)
+
+		lenArgsEntries = 0
+
+		fmt.Printf(
+			"[LogAppend] S%vT%v: updated from %v with %v \n",
+			rf.me,
+			rf.currentTerm,
+			startIndex+index,
+			args.Entries[index:],
+		)
+
+		break
 	}
 
 	// append possible remaining elements from args
 	if lenArgsEntries > remainingLen {
 		remainingElements := args.Entries[remainingLen:]
 		rf.log = append(rf.log, remainingElements...)
+
+		fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, remainingElements, rf.log)
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
@@ -236,12 +254,12 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendHeartBeat(server int, args AppendEntryArgs, reply *AppendEntryReply) bool {
+func (rf *Raft) sendAppendEntry(server int, args AppendEntryArgs, reply *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
 	return ok
 }
 
-func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit int) {
+func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit int) {
 	/*
 		Dual purpose of this method:
 		- Maintain Authority: Tell followers "I am still alive" (prevent election timeouts).
@@ -262,13 +280,14 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 	nextIndex := rf.getNextLogIndex(peer)
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
-	entries := rf.log[prevLogIndex:]
+
+	entries := rf.log[nextIndex:]
 
 	rf.mu.Unlock()
 
 	args := AppendEntryArgs{term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit}
 	reply := AppendEntryReply{}
-	ok := rf.sendHeartBeat(peer, args, &reply)
+	ok := rf.sendAppendEntry(peer, args, &reply)
 
 	if !ok {
 		/*
@@ -297,21 +316,44 @@ func (rf *Raft) handleHeartBeat(peer int, term int, leaderId int, leaderCommit i
 	}
 
 	if replySuccess {
+
+		lenEntries := len(entries)
+		if lenEntries == 0 {
+			return
+		}
+
 		// Update matchIndex to what we just sent
 		// Update nextIndex to matchIndex + 1
 		newMatchIndex := prevLogIndex + len(entries)
-
 		rf.matchIndex[peer] = newMatchIndex
+
+		oldNextIndex := rf.nextIndex[peer]
 		rf.nextIndex[peer] = newMatchIndex + 1
+
+		fmt.Printf(
+			"[NextIndexUpdate]: S%v updated nextIndex from %v to %v because entries %v \n",
+			peer,
+			oldNextIndex,
+			rf.nextIndex[peer],
+			entries,
+		)
+
+		// increment number of servers that replicated last entry (possible other previous ones too)
+		rf.replicateCount += 1
+		if rf.replicateCount >= rf.majority {
+			rf.commitIndex += 1
+			// apply command to own state
+		}
 
 	} else {
 		// Decrements nextIndex for peer and retry the AppendEntries RPC next time the ticker fires until logs match
 
+		oldNextIndex := rf.nextIndex[peer]
+		rf.nextIndex[peer] = max(1, oldNextIndex-1)
+
 		fmt.Printf(
 			"[LogBackoff] S%d T%d: S%d rejected AppendEntries at PrevLogIndex %d. Decrement NextIndex from %d to %d\n",
-			leaderId, term, peer, prevLogIndex, prevLogIndex, prevLogIndex-1)
-
-		rf.nextIndex[peer] = max(1, prevLogIndex-1)
+			leaderId, term, peer, prevLogIndex, oldNextIndex, rf.nextIndex[peer])
 	}
 }
 
@@ -398,7 +440,7 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 
 	rf.votesReceived += 1
 
-	if rf.votesReceived >= rf.majority {
+	if rf.votesReceived >= rf.majority && rf.state != Leader {
 		rf.becomeLeader()
 	}
 }
@@ -459,7 +501,7 @@ func (rf *Raft) ticker() {
 						continue
 					}
 
-					go rf.handleHeartBeat(peerId, currentTerm, leaderId, commitIndex)
+					go rf.handleAppendEntry(peerId, currentTerm, leaderId, commitIndex)
 				}
 
 				continue
@@ -470,7 +512,7 @@ func (rf *Raft) ticker() {
 		}
 
 		// More documentation below at [3]
-		if rf.timePassedSince(rf.lastAppend) > time.Duration(rf.electionTimeout * int(time.Millisecond)) {
+		if rf.timePassedSince(rf.lastAppend) > time.Duration(rf.electionTimeout*int(time.Millisecond)) {
 			/*
 				update timer here (not in startElection) because go goroutine() schedules it,
 				not starts it, what if queue is big, the goroutine might not start and the election
@@ -516,7 +558,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastAppend = time.Now()
 	rf.lastHeartBeatSent = time.Now()
 	rf.heartBeatInterval = 100
-	
+
 	rf.log = append(rf.log, LogEntry{Term: 0})
 
 	// initialize from state persisted before a crash
@@ -526,6 +568,77 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	return rf
+}
+
+func (rf *Raft) replicateCommand(command any) {
+	/*
+		Step 1: append command to own log
+		Step 2: issue AppendEntries RPCs in parallel to replicate the entry
+		Step 3: (might not happen) when the entry has been safely replicated (as described below),
+				the leader applies the entry to its state machine and returns the result of that execution
+				to the client.
+	*/
+	rf.mu.Lock()
+
+	term := rf.currentTerm
+	commitIndex := rf.commitIndex
+	leaderId := rf.me
+
+	// reset replicateCount
+	rf.replicateCount = 1
+
+	entry := LogEntry{command, term, len(rf.log)}
+	rf.log = append(rf.log, entry)
+
+	rf.mu.Unlock()
+
+	for peerId := range rf.peers {
+
+		if peerId == leaderId {
+			continue
+		}
+
+		go rf.handleAppendEntry(peerId, term, leaderId, commitIndex)
+	}
+}
+
+// the service using Raft (e.g. a k/v server) wants to start
+// agreement on the next command to be appended to Raft's log. if this
+// server isn't the leader, returns false. otherwise start the
+// agreement and return immediately. there is no guarantee that this
+// command will ever be committed to the Raft log, since the leader
+// may fail or lose an election. even if the Raft instance has been killed,
+// this function should return gracefully.
+//
+// the first return value is the index that the command will appear at
+// if it's ever committed. the second return value is the current
+// term. the third return value is true if this server believes it is
+// the leader.
+func (rf *Raft) Start(command any) (int, int, bool) {
+	index := -1
+	term := -1
+	isLeader := true
+
+	// Your code here (3B).
+
+	if rf.killed() {
+		return index, term, isLeader
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.state != Leader {
+		isLeader = false
+		return index, term, isLeader
+	}
+
+	go rf.replicateCommand(command)
+
+	index = rf.getLastLogIndex() + 1
+	term = rf.currentTerm
+
+	return index, term, isLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -580,28 +693,6 @@ func (rf *Raft) PersistBytes() int {
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 
-}
-
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (3B).
-
-	return index, term, isLeader
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
