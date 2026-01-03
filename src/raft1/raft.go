@@ -122,6 +122,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	reply.AppendNeeded = false
 
 	// reject appendEntry request (Fig2): requester is behind term wise
 	if rf.currentTerm > args.Term {
@@ -194,6 +195,8 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		}
 
 		// discard everything and append rest of logs from args
+		reply.AppendNeeded = true
+
 		rf.log = append(rf.log[:startIndex+index], args.Entries[index:]...)
 
 		lenArgsEntries = 0
@@ -211,6 +214,9 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 
 	// append possible remaining elements from args
 	if lenArgsEntries > remainingLen {
+
+		reply.AppendNeeded = true
+
 		remainingElements := args.Entries[remainingLen:]
 		rf.log = append(rf.log, remainingElements...)
 
@@ -302,6 +308,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	replySuccess := reply.Success
 	replyTerm := reply.Term
+	replyAppendNeeded := reply.AppendNeeded
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -318,7 +325,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	if replySuccess {
 
 		lenEntries := len(entries)
-		if lenEntries == 0 {
+		if !replyAppendNeeded || lenEntries == 0 {
 			return
 		}
 
