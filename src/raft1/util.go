@@ -29,6 +29,14 @@ func (rf *Raft) getLastLogTerm() int {
 	return lastLogTerm
 }
 
+func (rf *Raft) getLastLogCommand() any {
+	entries := rf.log
+	lastLog := entries[len(entries)-1]
+	lastLogCommand := lastLog.Command
+
+	return lastLogCommand
+}
+
 func (rf *Raft) getLogTermForIndex(index int) int {
 	entries := rf.log
 
