@@ -204,11 +204,26 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		lenArgsEntries = 0
 
 		fmt.Printf(
-			"[LogAppend] S%vT%v: updated from %v with %v \n",
+			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
 			rf.me,
 			rf.currentTerm,
 			startIndex+index,
 			args.Entries[index:],
+			rf.log,
+		)
+
+		/*
+			lower commitIndex until last entry that matches, those that will be replaced / added
+			are not yet committed
+		*/
+		oldCommitIndex := rf.commitIndex
+		rf.commitIndex = startIndex + index - 1
+		fmt.Printf(
+			"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
+			rf.me,
+			rf.currentTerm,
+			oldCommitIndex,
+			rf.commitIndex,
 		)
 
 		break
@@ -246,7 +261,15 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
 	}
 
+	oldCommitIndex := rf.commitIndex
 	rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+	fmt.Printf(
+		"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
+		rf.me,
+		rf.currentTerm,
+		oldCommitIndex,
+		rf.commitIndex,
+	)
 }
 
 /*
@@ -370,7 +393,16 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 				rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
 
 				// update committedIndex
+				oldCommitIndex := rf.commitIndex
 				rf.commitIndex = lastReplicatedIndexByPeer
+
+				fmt.Printf(
+					"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
+					rf.me,
+					rf.currentTerm,
+					oldCommitIndex,
+					rf.commitIndex,
+				)
 			}
 
 		}
@@ -379,7 +411,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			"[ReplicateSuccess] S%vT%v replicated %v on S%v (Total: %v) \n",
 			leaderId,
 			term,
-			rf.log[len(rf.log)-1-lenEntries:],
+			rf.log[len(rf.log)-lenEntries:],
 			peer,
 			rf.replicateCount,
 		)
