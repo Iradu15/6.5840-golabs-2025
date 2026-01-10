@@ -211,7 +211,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 		)
 
 		/*
-			lower commitIndex until last entry that matches, those that will be replaced / added
+			decrement commitIndex until last entry that matches, those that will be replaced / added
 			are not yet committed
 		*/
 		oldCommitIndex := rf.commitIndex
