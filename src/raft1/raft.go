@@ -639,7 +639,7 @@ func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 
 func (rf *Raft) replicateCommand(command any) {
 	/*
-		Step 1: append command to own log
+		Step 1: append command to own log ( done in Start() )
 		Step 2: issue AppendEntries RPCs in parallel to replicate the entry
 		Step 3: (might not happen) when the entry has been safely replicated (as described below),
 				the leader applies the entry to its state machine and returns the result of that execution
@@ -652,13 +652,6 @@ func (rf *Raft) replicateCommand(command any) {
 	leaderId := rf.me
 
 	lenEntries := len(rf.log)
-
-	// append new entry to log
-	entry := LogEntry{command, term, lenEntries}
-	rf.log = append(rf.log, entry)
-	fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", leaderId, term, entry, rf.log)
-
-	lenEntries++
 
 	rf.nextIndex[rf.me] = lenEntries
 	rf.matchIndex[rf.me] = lenEntries - 1
@@ -736,10 +729,19 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 		return index, term, isLeader
 	}
 
+	// add entry to log. It needs to be quick, can't wait for the goroutine to execute
+	lenEntries := len(rf.log)
+
+	entry := LogEntry{command, rf.currentTerm, lenEntries}
+	rf.log = append(rf.log, entry)
+	lenEntries += 1
+
+	fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
+
 	go rf.replicateCommand(command)
 
-	index = rf.getLastLogIndex() + 1
 	term = rf.currentTerm
+	index = lenEntries - 1
 
 	return index, term, isLeader
 }
