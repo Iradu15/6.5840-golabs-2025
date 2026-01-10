@@ -177,62 +177,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 
 	// update log entries
 	startIndex := args.PrevLogIndex + 1
-
-	remainingLen := len(rf.log) - startIndex
-	lenArgsEntries := len(args.Entries)
-
-	for index := range min(remainingLen, lenArgsEntries) {
-
-		entry := rf.log[startIndex+index]
-		argEntry := args.Entries[index]
-
-		if entry == argEntry {
-			continue
-		}
-
-		// discard everything and append rest of logs from args
-		reply.AppendNeeded = true
-
-		rf.log = append(rf.log[:startIndex+index], args.Entries[index:]...)
-
-		lenArgsEntries = 0
-
-		fmt.Printf(
-			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
-			rf.me,
-			rf.currentTerm,
-			startIndex+index,
-			args.Entries[index:],
-			rf.log,
-		)
-
-		/*
-			decrement commitIndex until last entry that matches, those that will be replaced / added
-			are not yet committed
-		*/
-		oldCommitIndex := rf.commitIndex
-		rf.commitIndex = startIndex + index - 1
-		fmt.Printf(
-			"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
-			rf.me,
-			rf.currentTerm,
-			oldCommitIndex,
-			rf.commitIndex,
-		)
-
-		break
-	}
-
-	// append possible remaining elements from args
-	if lenArgsEntries > remainingLen {
-
-		reply.AppendNeeded = true
-
-		remainingElements := args.Entries[remainingLen:]
-		rf.log = append(rf.log, remainingElements...)
-
-		fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, remainingElements, rf.log)
-	}
+	reply.AppendNeeded = rf.reconcileLog(startIndex, args.Entries)
 
 	// no entries to commit, already up to date
 	if rf.commitIndex >= args.LeaderCommit {
@@ -266,6 +211,81 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 	)
 }
 
+// reconcileLog reconciles the local log with a batch of new entries starting at the given index.
+//
+// It implements the conflict resolution logic required by Raft:
+//  1. Conflict Detection: It compares existing entries with the new entries.
+//     If a mismatch is found, it truncates the local
+//     log at the point of conflict and appends the rest of the new entries.
+//  2. Log Extension: If the new entries extend beyond the current log length
+//     (and no conflicts were found), the remaining entries are appended.
+//  3. Commit Safety: In the event of a conflict, it rolls back the commitIndex
+//     to the last matching entry to ensure safety before the new uncommitted
+//     entries are added.
+//
+// It returns true if the log was modified (entries appended or replaced).
+func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
+	appendNeeded := false
+
+	remainingLen := len(rf.log) - startIndex
+	lenArgsEntries := len(argsEntries)
+
+	for index := range min(remainingLen, lenArgsEntries) {
+
+		entry := rf.log[startIndex+index]
+		argEntry := argsEntries[index]
+
+		if entry == argEntry {
+			continue
+		}
+
+		// discard everything and append rest of logs from args
+		appendNeeded = true
+
+		rf.log = append(rf.log[:startIndex+index], argsEntries[index:]...)
+
+		lenArgsEntries = 0
+
+		fmt.Printf(
+			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
+			rf.me,
+			rf.currentTerm,
+			startIndex+index,
+			argsEntries[index:],
+			rf.log,
+		)
+
+		/*
+			decrement commitIndex until last entry that matches, those that will be replaced / added
+			are not yet committed
+		*/
+		oldCommitIndex := rf.commitIndex
+		rf.commitIndex = startIndex + index - 1
+		fmt.Printf(
+			"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
+			rf.me,
+			rf.currentTerm,
+			oldCommitIndex,
+			rf.commitIndex,
+		)
+
+		break
+	}
+
+	// append possible remaining elements from args
+	if lenArgsEntries > remainingLen {
+
+		appendNeeded = true
+
+		remainingElements := argsEntries[remainingLen:]
+		rf.log = append(rf.log, remainingElements...)
+
+		fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, remainingElements, rf.log)
+	}
+
+	return appendNeeded
+}
+
 // More documentation below at [0]
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
@@ -278,10 +298,11 @@ func (rf *Raft) sendAppendEntry(server int, args AppendEntryArgs, reply *AppendE
 }
 
 // handleAppendEntry manages the transmission of an AppendEntry RPC to a single peer
-// 
+//
 // Dual purpose of this method:
-// 	- Maintain Authority: Tell followers "I am still alive" (prevent election timeouts).
-// 	- Replicate Data: Check if the follower is behind and send missing entries.
+//   - Maintain Authority: Tell followers "I am still alive" (prevent election timeouts).
+//   - Replicate Data: Check if the follower is behind and send missing entries.
+//
 // More documentation below at [1]
 func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit int) {
 	rf.mu.Lock()
@@ -630,7 +651,7 @@ func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 }
 
 // replicateCommand manages the consensus flow for a new client operation.
-// 
+//
 // It follows the lifecycle of a log entry:
 //  1. Append command to own log (done in Start()).
 //  2. Issue AppendEntries RPCs in parallel to replicate the entry.
