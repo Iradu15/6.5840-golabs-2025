@@ -56,7 +56,6 @@ type Raft struct {
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -103,20 +102,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	fmt.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
-
-	rf.lastAppend = time.Now()
-	rf.votedFor = args.CandidateId
-	rf.currentTerm = args.Term
-	rf.changeState(Follower)
 	reply.VoteGranted = true
+	rf.votedFor = args.CandidateId
+
+	rf.changeState(Follower)
+	rf.lastAppend = time.Now()
+
+	rf.currentTerm = args.Term
 }
 
+// AppendEntry handles the AppendEntries RPC sent by a leader (More documentation below at [2])
 func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
-	/*
-		Handler for receiving AppendEntryRequest (HeartBeat included) from leader.
-		More documentation below at [2]
-	*/
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -270,9 +266,7 @@ func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
 	)
 }
 
-/*
-More documentation below at [0]
-*/
+// More documentation below at [0]
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -283,13 +277,13 @@ func (rf *Raft) sendAppendEntry(server int, args AppendEntryArgs, reply *AppendE
 	return ok
 }
 
+// handleAppendEntry manages the transmission of an AppendEntry RPC to a single peer
+// 
+// Dual purpose of this method:
+// 	- Maintain Authority: Tell followers "I am still alive" (prevent election timeouts).
+// 	- Replicate Data: Check if the follower is behind and send missing entries.
+// More documentation below at [1]
 func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit int) {
-	/*
-		Dual purpose of this method:
-		- Maintain Authority: Tell followers "I am still alive" (prevent election timeouts).
-		- Replicate Data: Check if the follower is behind and send missing entries.
-		More documentation below at [1]
-	*/
 	rf.mu.Lock()
 
 	if rf.state != Leader {
@@ -433,10 +427,8 @@ func (rf *Raft) becomeLeader() {
 	}
 }
 
+// handleRequestVote manages the transmission of a RequestVote RPC to a single peer during an election
 func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogTerm int, candidateId int) {
-	/*
-		Handle request for vote and response from peer
-	*/
 	rf.mu.Lock()
 
 	if rf.state != Candidate {
@@ -637,14 +629,15 @@ func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 	fmt.Printf("[ApplyCh] S%vT%v Sent %v via ApplyMsg \n", peer, term, applyMsg)
 }
 
+// replicateCommand manages the consensus flow for a new client operation.
+// 
+// It follows the lifecycle of a log entry:
+//  1. Append command to own log (done in Start()).
+//  2. Issue AppendEntries RPCs in parallel to replicate the entry.
+//  3. (Might not happen) When the entry has been safely replicated (as described
+//     below), the leader applies the entry to its state machine and returns the
+//     result of that execution to the client.
 func (rf *Raft) replicateCommand(command any) {
-	/*
-		Step 1: append command to own log ( done in Start() )
-		Step 2: issue AppendEntries RPCs in parallel to replicate the entry
-		Step 3: (might not happen) when the entry has been safely replicated (as described below),
-				the leader applies the entry to its state machine and returns the result of that execution
-				to the client.
-	*/
 	rf.mu.Lock()
 
 	term := rf.currentTerm
