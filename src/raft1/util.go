@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"time"
 )
@@ -93,7 +94,6 @@ func (rf *Raft) atLeastUpToDate(requesterLastLogIndex int, requesterLastLogTerm 
 	return requesterLastLogTerm >= lastLogTerm
 }
 
-
 func (rf *Raft) changeState(newState State) {
 	rf.state = newState
 }
@@ -120,4 +120,42 @@ func (rf *Raft) stepDown(replyTerm int) {
 	rf.changeState(Follower)
 	rf.currentTerm = replyTerm
 	rf.votedFor = -1 // always when update term, votedFor gets -1
+}
+
+func (rf *Raft) getMaxCommittedIndex() int{
+	/*
+		Get maximum matchIndex that is replicated on a majority of servers
+	*/
+
+	res := 0
+	matchIndexMap := map[int]int{}
+	
+	// extract all distinct values for matchIndex
+	for peer := range rf.peers{
+		matchIndex := rf.matchIndex[peer]
+		matchIndexMap[matchIndex] = 1
+	}
+
+	for matchIndex := range matchIndexMap{
+
+		replicatedCount := 0
+		
+		for peer := range rf.peers{
+			
+			peerMatchIndex := rf.matchIndex[peer]
+
+			if peerMatchIndex >= matchIndex{
+				replicatedCount += 1
+				
+				if replicatedCount >= rf.majority{
+					res = max(res, matchIndex)
+					break
+				}
+			}
+		}
+	}
+
+	fmt.Printf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
+
+	return res
 }

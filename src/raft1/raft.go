@@ -52,8 +52,6 @@ type Raft struct {
 
 	votesReceived int
 
-	replicateCount int
-
 	applyCh chan raftapi.ApplyMsg
 }
 
@@ -365,20 +363,14 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			entries,
 		)
 
-		// another server replicated last command (given entries also contain last command)
-		rf.replicateCount += 1
-		if rf.replicateCount >= rf.majority {
+		maxCommitIndex := rf.getMaxCommittedIndex()
+		// update commitIndex value and apply uncommitted values
+		if maxCommitIndex > rf.commitIndex {
 
-			/*
-				peer replicated last entry successfully. If not greater than rf.commitIndex,
-				it was already committed by leader
-			*/
+			for index := rf.commitIndex; index <= maxCommitIndex; index++ {
 
-			lastReplicatedIndexByPeer := rf.getLastLogIndex()
-			if lastReplicatedIndexByPeer > rf.commitIndex {
-
-				command := rf.getLastLogCommand()
-				commandIndex := rf.getLastLogIndex()
+				command := rf.log[index].Command
+				commandIndex := index
 				applyMsg := raftapi.ApplyMsg{
 					CommandValid:  true,
 					Command:       command,
@@ -389,31 +381,27 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 					SnapshotIndex: -1,
 				}
 
-				// commit the entry now that it was successfully replicated on a majority of servers
 				rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
-
-				// update committedIndex
-				oldCommitIndex := rf.commitIndex
-				rf.commitIndex = lastReplicatedIndexByPeer
-
-				fmt.Printf(
-					"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
-					rf.me,
-					rf.currentTerm,
-					oldCommitIndex,
-					rf.commitIndex,
-				)
 			}
 
+			oldCommitIndex := rf.commitIndex
+			rf.commitIndex = maxCommitIndex
+
+			fmt.Printf(
+				"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
+				rf.me,
+				rf.currentTerm,
+				oldCommitIndex,
+				rf.commitIndex,
+			)
 		}
 
 		fmt.Printf(
-			"[ReplicateSuccess] S%vT%v replicated %v on S%v (Total: %v) \n",
+			"[ReplicateSuccess] S%vT%v replicated %v on S%v \n",
 			leaderId,
 			term,
 			rf.log[len(rf.log)-lenEntries:],
 			peer,
-			rf.replicateCount,
 		)
 
 	} else {
@@ -663,12 +651,17 @@ func (rf *Raft) replicateCommand(command any) {
 	commitIndex := rf.commitIndex
 	leaderId := rf.me
 
-	// reset replicateCount
-	rf.replicateCount = 1
+	lenEntries := len(rf.log)
 
-	entry := LogEntry{command, term, len(rf.log)}
+	// append new entry to log
+	entry := LogEntry{command, term, lenEntries}
 	rf.log = append(rf.log, entry)
 	fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", leaderId, term, entry, rf.log)
+
+	lenEntries++
+
+	rf.nextIndex[rf.me] = lenEntries
+	rf.matchIndex[rf.me] = lenEntries - 1
 
 	rf.mu.Unlock()
 
@@ -680,6 +673,36 @@ func (rf *Raft) replicateCommand(command any) {
 
 		go rf.handleAppendEntry(peerId, term, leaderId, commitIndex)
 	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	maxCommitIndex := rf.getMaxCommittedIndex()
+
+	if rf.commitIndex >= maxCommitIndex {
+		return
+	}
+
+	// update commitIndex value and apply uncommitted values
+
+	for index := rf.commitIndex; index <= maxCommitIndex; index++ {
+
+		command := rf.log[index].Command
+		commandIndex := index
+		applyMsg := raftapi.ApplyMsg{
+			CommandValid:  true,
+			Command:       command,
+			CommandIndex:  commandIndex,
+			SnapshotValid: false,
+			Snapshot:      []byte{},
+			SnapshotTerm:  -1,
+			SnapshotIndex: -1,
+		}
+
+		rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
+	}
+
+	rf.commitIndex = maxCommitIndex
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
