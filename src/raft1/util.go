@@ -3,6 +3,7 @@ package raft
 import (
 	"fmt"
 	"log"
+	"slices"
 	"time"
 )
 
@@ -115,39 +116,16 @@ func (rf *Raft) stepDown(replyTerm int) {
 // getMaxCommittedIndex calculates the highest log index that is known to be
 // replicated on a majority of servers.
 //
-// It iterates through all unique matchIndex values currently tracked for peers
-// and checks if each index is present on at least rf.majority servers.
-// The highest index satisfying this condition is returned.
+// Sort matchIndex and pick the median.
 //
 // This value is used by the leader to advance its own commitIndex.
 func (rf *Raft) getMaxCommittedIndex() int {
-	res := 0
-	matchIndexMap := map[int]int{}
+	copySlice := make([]int, len(rf.matchIndex))
+	copy(copySlice, rf.matchIndex)
 
-	// extract all distinct values for matchIndex
-	for peer := range rf.peers {
-		matchIndex := rf.matchIndex[peer]
-		matchIndexMap[matchIndex] = 1
-	}
+	slices.Sort(copySlice)
 
-	for matchIndex := range matchIndexMap {
-
-		replicatedCount := 0
-
-		for peer := range rf.peers {
-
-			peerMatchIndex := rf.matchIndex[peer]
-
-			if peerMatchIndex >= matchIndex {
-				replicatedCount += 1
-
-				if replicatedCount >= rf.majority {
-					res = max(res, matchIndex)
-					break
-				}
-			}
-		}
-	}
+	res := copySlice[rf.majority-1]
 
 	fmt.Printf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
 
