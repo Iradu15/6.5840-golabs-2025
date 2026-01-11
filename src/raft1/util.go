@@ -1,7 +1,9 @@
 package raft
 
 import (
+	"fmt"
 	"log"
+	"slices"
 	"time"
 )
 
@@ -29,6 +31,14 @@ func (rf *Raft) getLastLogTerm() int {
 	return lastLogTerm
 }
 
+func (rf *Raft) getLastLogCommand() any {
+	entries := rf.log
+	lastLog := entries[len(entries)-1]
+	lastLogCommand := lastLog.Command
+
+	return lastLogCommand
+}
+
 func (rf *Raft) getLogTermForIndex(index int) int {
 	entries := rf.log
 
@@ -46,20 +56,18 @@ func (rf *Raft) getNextLogIndex(peer int) int {
 	return rf.nextIndex[peer]
 }
 
+// moreUpToDate checks if the candidate is more up to date than the current server.
+//
+// Up to date is defined by comparing the index and term of the last entries.
+// The log with the later term is up to date. If terms are equal, the longer
+// log is more up to date.
+//
+// As described in the Raft paper: "Raft determines which of two logs is more
+// up-to-date by comparing the index and term of the last entries in the logs.
+// If the logs have last entries with different terms, then the log with the
+// later term is more up-to-date. If the logs end with the same term, then
+// whichever log is longer is more up-to-date."
 func (rf *Raft) moreUpToDate(requesterLastLogIndex int, requesterLastLogTerm int) bool {
-	/*
-		Check if candidate is more up to date than current server.
-		Up to date = comparing the index and term of the last entries.
-		The log with later term is up to date. If equal, the longer log is more up to date
-
-		Raft determines which of two logs is more up-to-date
-		by comparing the index and term of the last entries in the
-		logs. If the logs have last entries with different terms, then
-		the log with the later term is more up-to-date. If the logs
-		end with the same term, then whichever log is longer is
-		more up-to-date
-	*/
-
 	lastLogTerm := rf.getLastLogTerm()
 	lastLogIndex := rf.getLastLogIndex()
 
@@ -68,13 +76,10 @@ func (rf *Raft) moreUpToDate(requesterLastLogIndex int, requesterLastLogTerm int
 	}
 
 	return requesterLastLogTerm > lastLogTerm
-
 }
 
+// atLeastUpToDate is a more permissive extension of moreUpToDate
 func (rf *Raft) atLeastUpToDate(requesterLastLogIndex int, requesterLastLogTerm int) bool {
-	/*
-		Extension of moreUpToDate
-	*/
 	lastLogTerm := rf.getLastLogTerm()
 	lastLogIndex := rf.getLastLogIndex()
 
@@ -85,19 +90,15 @@ func (rf *Raft) atLeastUpToDate(requesterLastLogIndex int, requesterLastLogTerm 
 	return requesterLastLogTerm >= lastLogTerm
 }
 
-
 func (rf *Raft) changeState(newState State) {
 	rf.state = newState
 }
 
+// GetState returns currentTerm and whether this server believes it is the leader
 func (rf *Raft) GetState() (int, bool) {
-	/*
-		Return currentTerm and whether this server believes it is the leader.
-	*/
-	// Your code here (3A).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	
+
 	return rf.currentTerm, rf.state == Leader
 }
 
@@ -105,11 +106,28 @@ func (rf *Raft) timePassedSince(lastEventTime time.Time) time.Duration {
 	return time.Since(lastEventTime)
 }
 
+// stepDown converts to follower, updates currentTerm and resets voted for
 func (rf *Raft) stepDown(replyTerm int) {
-	/*
-		Convert to follower, update currentTerm and reset voted for
-	*/
 	rf.changeState(Follower)
 	rf.currentTerm = replyTerm
 	rf.votedFor = -1 // always when update term, votedFor gets -1
+}
+
+// getMaxCommittedIndex calculates the highest log index that is known to be
+// replicated on a majority of servers.
+//
+// Sort matchIndex and pick the median.
+//
+// This value is used by the leader to advance its own commitIndex.
+func (rf *Raft) getMaxCommittedIndex() int {
+	copySlice := make([]int, len(rf.matchIndex))
+	copy(copySlice, rf.matchIndex)
+
+	slices.Sort(copySlice)
+
+	res := copySlice[rf.majority-1]
+
+	fmt.Printf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
+
+	return res
 }

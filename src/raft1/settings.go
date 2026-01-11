@@ -31,6 +31,12 @@ type AppendEntryArgs struct {
 type AppendEntryReply struct {
 	Term    int
 	Success bool
+	/*
+		specifies if append of entries was necessary.
+		Ex of usage:
+			Append entries was not refused, but no entries were appended because already up to date
+	*/
+	AppendNeeded bool
 }
 
 type State int
