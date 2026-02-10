@@ -131,3 +131,41 @@ func (rf *Raft) getMaxCommittedIndex() int {
 
 	return res
 }
+
+// getFirstIndexOfGivenTerm returns the index of the first occurrence of a
+// given term in own log.
+//
+// Used for log reconciliation optimization
+func (rf *Raft) getFirstIndexOfGivenTerm(startPosition int, term int) int {
+	// pay attention to startPosition, otherwise it might never find sought value
+	if rf.log[startPosition].Term != term {
+		fmt.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+	}
+
+	for index := startPosition; index < 0; index-- {
+		if rf.log[index].Term != term {
+			return index + 1
+		}
+	}
+
+	return 1
+}
+
+// getLastIndexOfGivenTerm returns the index of the first occurrence of a
+// given term in own log.
+//
+// Used for log reconciliation optimization
+func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
+	// pay attention to startPosition, otherwise it might never find sought value
+	if rf.log[startPosition].Term != term {
+		fmt.Printf("[StartPosition Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+	}
+
+	for index := startPosition; index < len(rf.log); index++ {
+		if rf.log[index].Term != term {
+			return index - 1
+		}
+	}
+
+	return 1
+}
