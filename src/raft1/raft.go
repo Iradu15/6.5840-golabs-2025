@@ -124,7 +124,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 // AppendEntry handles the AppendEntries RPC sent by a leader (More documentation below at [2])
-func (rf *Raft) AppendEntry(args AppendEntryArgs, reply *AppendEntryReply) {
+func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -320,7 +320,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendAppendEntry(server int, args AppendEntryArgs, reply *AppendEntryReply) bool {
+func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
 	return ok
 }
@@ -348,13 +348,17 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
 
-	entries := rf.log[nextIndex:]
+	// NOTE: this does NOT copy, it passes a pointer, so later it can be modified even if inside lock
+	// SOLUTION: deep copy: https://gemini.google.com/share/957cda6db728
+	entriesToBeSent := rf.log[nextIndex:]
+	entries := make([]LogEntry, len(entriesToBeSent))
+	copy(entries, entriesToBeSent)
 
 	rf.mu.Unlock()
 
 	args := AppendEntryArgs{term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit}
 	reply := AppendEntryReply{}
-	ok := rf.sendAppendEntry(peer, args, &reply)
+	ok := rf.sendAppendEntry(peer, &args, &reply)
 
 	if !ok {
 		/*
