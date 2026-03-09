@@ -9,7 +9,7 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
-	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -65,7 +65,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Fig2: RequestVote RPC: rule 1
 	if rf.currentTerm > args.Term {
-		fmt.Printf("%v rejected request vote from %v due to lower term \n", rf.me, args.CandidateId)
+		log.Printf("%v rejected request vote from %v due to lower term \n", rf.me, args.CandidateId)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 
-		fmt.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
+		log.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
 
 		// persist to "disk" (disk = persister object)
 		rf.persist()
@@ -96,14 +96,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// if already granted vote (terms are equal, if higher would have granted, if lower would have rejected), deny vote
 	if rf.votedFor != -1 {
-		fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Already voted for S%d)\n",
+		log.Printf("[VoteReject] S%d T%d: Rejected S%d (Already voted for S%d)\n",
 			rf.me, rf.currentTerm, args.CandidateId, rf.votedFor)
 
 		return
 	}
 
 	if !rf.moreUpToDate(args.LastLogIndex, args.LastLogTerm) {
-		fmt.Printf("[VoteReject] S%d T%d: Rejected S%d (Cand=[%d/T%d] vs Me=[%d/T%d])\n",
+		log.Printf("[VoteReject] S%d T%d: Rejected S%d (Cand=[%d/T%d] vs Me=[%d/T%d])\n",
 			rf.me, rf.currentTerm, args.CandidateId,
 			args.LastLogIndex, args.LastLogTerm,
 			rf.getLastLogIndex(), rf.getLastLogTerm())
@@ -134,7 +134,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	// reject appendEntry request (Fig2): requester is behind term wise
 	if rf.currentTerm > args.Term {
-		fmt.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (Leader Term %d < My Term %d)\n",
+		log.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (Leader Term %d < My Term %d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.Term, rf.currentTerm)
 
 		return
@@ -182,7 +182,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.TermAtLeaderIndex = lastTerm
 		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(currentPosition, lastTerm)
 
-		fmt.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
+		log.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, len(rf.log))
 
 		return
@@ -195,7 +195,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.TermAtLeaderIndex = termAtLeaderIndex
 		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(args.PrevLogIndex, termAtLeaderIndex)
 
-		fmt.Printf("[AppendEntryReject] S%d T%d: Rejected S%d at Index %d (Have Term %d, Leader Expects %d)\n",
+		log.Printf("[AppendEntryReject] S%d T%d: Rejected S%d at Index %d (Have Term %d, Leader Expects %d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, termAtLeaderIndex, args.PrevLogTerm)
 
 		return
@@ -258,23 +258,28 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	remainingLen := len(rf.log) - startIndex
 	lenArgsEntries := len(argsEntries)
 
+	/*
+		compare existing log to the ones sent by the leader.
+		Due to unreliable network it might send RPC from indexes where
+		the follower already appended entries, so it might delete valid entries:
+		RPC 0 at indexes: [10, 11, 12]
+		RPC 1 ar  indexes: [10], so it might delete valid 11 and 12
+	*/
 	for index := range min(remainingLen, lenArgsEntries) {
 
 		entry := rf.log[startIndex+index]
 		argEntry := argsEntries[index]
 
-		if entry == argEntry {
+		if entry.Term == argEntry.Term {
 			continue
 		}
 
 		// discard everything and append rest of logs from args
 		appendNeeded = true
-
 		rf.log = append(rf.log[:startIndex+index], argsEntries[index:]...)
-
 		lenArgsEntries = 0
 
-		fmt.Printf(
+		log.Printf(
 			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
 			rf.me,
 			rf.currentTerm,
@@ -308,7 +313,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 		remainingElements := argsEntries[remainingLen:]
 		rf.log = append(rf.log, remainingElements...)
 
-		fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, remainingElements, rf.log)
+		log.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, remainingElements, rf.log)
 	}
 
 	return appendNeeded
@@ -404,7 +409,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			rf.nextIndex[peer] = reply.IndexOfFirstTermAtLeaderIndex
 		}
 
-		fmt.Printf(
+		log.Printf(
 			"[LogBackoff] S%d T%d: S%d rejected AppendEntries at PrevLogIndex %d. Decrement NextIndex from %d to %d\n",
 			leaderId, term, peer, prevLogIndex, oldNextIndex, rf.nextIndex[peer])
 
@@ -424,7 +429,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	oldNextIndex := rf.nextIndex[peer]
 	rf.nextIndex[peer] = newMatchIndex + 1
 
-	fmt.Printf(
+	log.Printf(
 		"[NextIndexUpdate]: S%v updated nextIndex from %v to %v because entries %v \n",
 		peer,
 		oldNextIndex,
@@ -465,7 +470,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		)
 	}
 
-	fmt.Printf(
+	log.Printf(
 		"[ReplicateSuccess] S%vT%v replicated %v on S%v \n",
 		leaderId,
 		term,
@@ -476,7 +481,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 }
 
 func (rf *Raft) becomeLeader() {
-	fmt.Printf("[Leader] S%d T%d: Won election and became Leader \n", rf.me, rf.currentTerm)
+	log.Printf("[Leader] S%d T%d: Won election and became Leader \n", rf.me, rf.currentTerm)
 
 	rf.changeState(Leader)
 
@@ -696,7 +701,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 	rf.applyCh <- applyMsg
 
-	fmt.Printf("[ApplyCh] S%vT%v Sent %v via ApplyMsg \n", peer, term, applyMsg)
+	log.Printf("[ApplyCh] S%vT%v Sent %v via ApplyMsg \n", peer, term, applyMsg)
 }
 
 // replicateCommand manages the consensus flow for a new client operation.
@@ -799,7 +804,7 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	rf.log = append(rf.log, entry)
 	lenEntries += 1
 
-	fmt.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
+	log.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
 
 	// persist to "disk" (disk = persister object)
 	rf.persist()
@@ -829,7 +834,7 @@ func (rf *Raft) persist() {
 
 	err := enc.Encode(&persistentRaftState)
 	if err != nil {
-		fmt.Printf("[EncodeError] S%vT%v: err for %v: %v\n", rf.me, rf.currentTerm, persistentRaftState, err)
+		log.Printf("[EncodeError] S%vT%v: err for %v: %v\n", rf.me, rf.currentTerm, persistentRaftState, err)
 	}
 
 	raftStateBytes := w.Bytes()
@@ -849,7 +854,7 @@ func (rf *Raft) persist() {
 func (rf *Raft) readPersist(data []byte) {
 	// on fresh start, no data to read
 	if data == nil || len(data) < 1 {
-		fmt.Printf("S%vT%v has no data from persister\n", rf.me, rf.currentTerm)
+		log.Printf("S%vT%v has no data from persister\n", rf.me, rf.currentTerm)
 		return
 	}
 
@@ -861,7 +866,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 	err := dec.Decode(&raftStateStruct)
 	if err != nil {
-		fmt.Printf("[DecodeError] S%vT%v err decoding %v into persister: %v \n", rf.me, rf.currentTerm, data, err)
+		log.Printf("[DecodeError] S%vT%v err decoding %v into persister: %v \n", rf.me, rf.currentTerm, data, err)
 		return
 	}
 
