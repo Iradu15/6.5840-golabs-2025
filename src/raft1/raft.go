@@ -213,7 +213,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	// commit remaining entries
-	for index := rf.commitIndex + 1; index <= args.LeaderCommit; index++ {
+	for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
 
 		applyMsg := raftapi.ApplyMsg{
 			CommandValid:  true,
@@ -441,7 +441,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	// update commitIndex value and apply uncommitted values
 	if maxCommitIndex > rf.commitIndex {
 
-		for index := rf.commitIndex; index <= maxCommitIndex; index++ {
+		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
 
 			command := rf.log[index].Command
 			commandIndex := index
