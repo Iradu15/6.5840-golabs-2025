@@ -53,6 +53,12 @@ type Raft struct {
 
 	votesReceived int
 
+	/*
+		per-peer flag to prevent concurrent AppendEntries
+		only used for TestRPCBytes3B test that counts how many bytes are sent
+	*/
+	replicating []bool
+
 	applyCh chan raftapi.ApplyMsg
 }
 
@@ -156,14 +162,14 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 			rf.changeState(Follower)
 
-			fmt.Printf(
-				"[ConvertToFollower (heartbeat)] S%vT%v steps down from %v due to S%vT%v\n",
-				rf.me,
-				rf.currentTerm,
-				rf.state,
-				args.LeaderId,
-				args.Term,
-			)
+			// fmt.Printf(
+			// 	"[ConvertToFollower (heartbeat)] S%vT%v steps down from %v due to S%vT%v\n",
+			// 	rf.me,
+			// 	rf.currentTerm,
+			// 	rf.state,
+			// 	args.LeaderId,
+			// 	args.Term,
+			// )
 		}
 	}
 
@@ -349,7 +355,13 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		return
 	}
 
-	nextIndex := rf.getNextLogIndex(peer)
+	if rf.replicating[peer] {
+		rf.mu.Unlock()
+		return
+	}
+	rf.replicating[peer] = true
+
+	nextIndex := rf.nextIndex[peer]
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
 
@@ -365,14 +377,17 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	reply := AppendEntryReply{}
 	ok := rf.sendAppendEntry(peer, &args, &reply)
 
+	rf.mu.Lock()
+	rf.replicating[peer] = false
+	rf.mu.Unlock()
+
 	if !ok {
 		/*
 			Do not retry in loop because it will block this thread, then after some time
 			another goroutine will be scheduled to retry for the same peer, and so on
 			=> lots of goroutines trying to reach same peer
 		*/
-		fmt.Printf("[HeartBeatError] %v did not respond to heartbeat from %v \n", peer, leaderId)
-
+		// log.Printf("[HeartBeatError] %v did not respond to heartbeat from %v \n", peer, leaderId)
 		return
 	}
 
@@ -384,12 +399,9 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	defer rf.mu.Unlock()
 
 	if replyTerm > term {
-		// step down and convert back to follower
-		fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", leaderId, term, peer, replyTerm)
-
+		// fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", leaderId, term, peer, replyTerm)
 		rf.stepDown(replyTerm)
 
-		// persist to "disk" (disk = persister object)
 		rf.persist()
 
 		return
@@ -494,6 +506,8 @@ func (rf *Raft) becomeLeader() {
 	for i := range rf.peers {
 		rf.nextIndex[i] = max(1, lastLogIndex)
 		rf.matchIndex[i] = 0
+		// reset replicating
+		rf.replicating[i] = false
 	}
 }
 
@@ -519,7 +533,7 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 
 	if !ok {
 		// peer did not respond
-		fmt.Printf("[RequestVoteError] %v did not respond to request vote from %v \n", peer, candidateId)
+		// fmt.Printf("[RequestVoteError] %v did not respond to request vote from %v \n", peer, candidateId)
 
 		return
 	}
@@ -534,7 +548,7 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 		// step down and convert back to follower
 		rf.stepDown(replyTerm)
 
-		fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", candidateId, term, peer, replyTerm)
+		// fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", candidateId, term, peer, replyTerm)
 
 		// persist to "disk" (disk = persister object)
 		rf.persist()
@@ -543,24 +557,24 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 	}
 
 	if !voteGranted {
-		fmt.Printf(
-			"[VoteDenied] S%d T%d: Peer S%d denied (ReplyTerm: %d)\n",
-			candidateId,
-			rf.currentTerm,
-			peer,
-			reply.Term,
-		)
+		// fmt.Printf(
+		// 	"[VoteDenied] S%d T%d: Peer S%d denied (ReplyTerm: %d)\n",
+		// 	candidateId,
+		// 	rf.currentTerm,
+		// 	peer,
+		// 	reply.Term,
+		// )
 
 		return
 	}
 
-	fmt.Printf(
-		"[VoteReceived] S%d T%d: Peer S%d granted vote (Total: %d)\n",
-		candidateId,
-		rf.currentTerm,
-		peer,
-		rf.votesReceived,
-	)
+	// fmt.Printf(
+	// 	"[VoteReceived] S%d T%d: Peer S%d granted vote (Total: %d)\n",
+	// 	candidateId,
+	// 	rf.currentTerm,
+	// 	peer,
+	// 	rf.votesReceived,
+	// )
 
 	rf.votesReceived += 1
 
@@ -572,7 +586,7 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 func (rf *Raft) startElection(term int) {
 	rf.mu.Lock()
 
-	fmt.Printf("[ElectionStarted] S%v T%v \n", rf.me, rf.currentTerm)
+	// fmt.Printf("[ElectionStarted] S%v T%v \n", rf.me, rf.currentTerm)
 
 	rf.changeState(Candidate)
 
@@ -587,7 +601,7 @@ func (rf *Raft) startElection(term int) {
 
 	rf.mu.Unlock()
 
-	fmt.Printf("[VoteSend] S%d T%d: started issuing request Votes\n", candidateId, rf.currentTerm)
+	// fmt.Printf("[VoteSend] S%d T%d: started issuing request Votes\n", candidateId, rf.currentTerm)
 
 	for peerId := range rf.peers {
 
@@ -658,53 +672,13 @@ func (rf *Raft) ticker() {
 	}
 }
 
-// the service or tester wants to create a Raft server. the ports
-// of all the Raft servers (including this one) are in peers[]. this
-// server's port is peers[me]. all the servers' peers[] arrays
-// have the same order. persister is a place for this server to
-// save its persistent state, and also initially holds the most
-// recent saved state, if any. applyCh is a channel on which the
-// tester or service expects Raft to send ApplyMsg messages.
-// Make() must return quickly, so it should start goroutines
-// for any long-running work.
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
-	// Your initialization code here (3A, 3B, 3C).
-	rf.majority = len(peers)/2 + 1
-
-	rf.currentTerm = 1
-	rf.votedFor = -1
-	rf.state = Follower
-
-	rf.lastAppend = time.Now()
-	rf.lastHeartBeatSent = time.Now()
-	rf.heartBeatInterval = 100
-
-	rf.log = append(rf.log, LogEntry{Term: 0})
-
-	rf.applyCh = applyCh
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
-
-	// start ticker goroutine to start elections
-	go rf.ticker()
-
-	return rf
-}
-
 func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 	rf.applyCh <- applyMsg
 
 	log.Printf("[ApplyCh] S%vT%v Sent %v via ApplyMsg \n", peer, term, applyMsg)
 }
 
-// replicateCommand manages the consensus flow for a new client operation.
+// handleReplicateCommand manages the consensus flow for a new client operation.
 //
 // It follows the lifecycle of a log entry:
 //  1. Append command to own log (done in Start()).
@@ -712,7 +686,7 @@ func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 //  3. (Might not happen) When the entry has been safely replicated (as described
 //     below), the leader applies the entry to its state machine and returns the
 //     result of that execution to the client.
-func (rf *Raft) replicateCommand(command any) {
+func (rf *Raft) handleReplicateCommand() {
 	rf.mu.Lock()
 
 	term := rf.currentTerm
@@ -809,7 +783,7 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	// persist to "disk" (disk = persister object)
 	rf.persist()
 
-	go rf.replicateCommand(command)
+	go rf.handleReplicateCommand()
 
 	term = rf.currentTerm
 	index = lenEntries - 1
@@ -870,12 +844,55 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 
-	fmt.Printf("S%v:Read data from persister %v \n", rf.me, raftStateStruct)
-
+	// log.Printf("S%v:Read data from persister %v \n", rf.me, raftStateStruct)
 	// restore data from the received bytes
 	rf.log = raftStateStruct.Logs
 	rf.currentTerm = raftStateStruct.CurrentTerm
 	rf.votedFor = raftStateStruct.VotedFor
+}
+
+// the service or tester wants to create a Raft server. the ports
+// of all the Raft servers (including this one) are in peers[]. this
+// server's port is peers[me]. all the servers' peers[] arrays
+// have the same order. persister is a place for this server to
+// save its persistent state, and also initially holds the most
+// recent saved state, if any. applyCh is a channel on which the
+// tester or service expects Raft to send ApplyMsg messages.
+// Make() must return quickly, so it should start goroutines
+// for any long-running work.
+func Make(peers []*labrpc.ClientEnd, me int,
+	persister *tester.Persister, applyCh chan raftapi.ApplyMsg) raftapi.Raft {
+	rf := &Raft{}
+	rf.peers = peers
+	rf.persister = persister
+	rf.me = me
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	// Your initialization code here (3A, 3B, 3C).
+	rf.majority = len(peers)/2 + 1
+
+	rf.currentTerm = 1
+	rf.votedFor = -1
+	rf.state = Follower
+
+	rf.lastAppend = time.Now()
+	rf.lastHeartBeatSent = time.Now()
+	rf.heartBeatInterval = 100
+
+	rf.log = append(rf.log, LogEntry{Term: 0})
+
+	rf.replicating = make([]bool, len(peers))
+
+	rf.applyCh = applyCh
+
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
+	// start ticker goroutine to start elections
+	go rf.ticker()
+
+	return rf
 }
 
 // how many bytes in Raft's persisted log?
