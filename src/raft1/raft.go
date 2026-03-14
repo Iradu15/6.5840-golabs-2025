@@ -41,7 +41,7 @@ type Raft struct {
 	log         []LogEntry
 	state       State
 
-	lastAppend        time.Time // keeps track of last log append or heartbeat received or request vote granted
+	lastHeartBeat     time.Time // keeps track of last log append or heartbeat received or request vote granted
 	lastHeartBeatSent time.Time
 	heartBeatInterval int
 
@@ -71,62 +71,34 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Fig2: RequestVote RPC: rule 1
 	if rf.currentTerm > args.Term {
-		log.Printf("%v rejected request vote from %v due to lower term \n", rf.me, args.CandidateId)
+		log.Printf("[VoteDeclined]%v rejected %v due to lower term \n", rf.me, args.CandidateId)
 		return
 	}
 
 	// Update term Fig2: Rules for Servers
 	if args.Term > rf.currentTerm {
-		rf.lastAppend = time.Now()
-
 		rf.stepDown(args.Term)
-
 		// persist to "disk" (disk = persister object)
 		rf.persist()
+
+		reply.Term = rf.currentTerm
 	}
 
 	// Fig2: RequestVote RPC: rule 2
 	if (rf.votedFor == args.CandidateId || rf.votedFor == -1) &&
 		rf.atLeastUpToDate(args.LastLogIndex, args.LastLogTerm) {
-
+		
+		// [Documentation Below (-1) ] valid RPC received
+		rf.lastHeartBeat = time.Now()
+		
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
-
 		log.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
 
-		// persist to "disk" (disk = persister object)
 		rf.persist()
 
 		return
 	}
-
-	// if already granted vote (terms are equal, if higher would have granted, if lower would have rejected), deny vote
-	if rf.votedFor != -1 {
-		log.Printf("[VoteReject] S%d T%d: Rejected S%d (Already voted for S%d)\n",
-			rf.me, rf.currentTerm, args.CandidateId, rf.votedFor)
-
-		return
-	}
-
-	if !rf.moreUpToDate(args.LastLogIndex, args.LastLogTerm) {
-		log.Printf("[VoteReject] S%d T%d: Rejected S%d (Cand=[%d/T%d] vs Me=[%d/T%d])\n",
-			rf.me, rf.currentTerm, args.CandidateId,
-			args.LastLogIndex, args.LastLogTerm,
-			rf.getLastLogIndex(), rf.getLastLogTerm())
-
-		return
-	}
-
-	reply.VoteGranted = true
-	rf.votedFor = args.CandidateId
-
-	rf.changeState(Follower)
-	rf.lastAppend = time.Now()
-
-	rf.currentTerm = args.Term
-
-	// persist to "disk" (disk = persister object)
-	rf.persist()
 }
 
 // AppendEntry handles the AppendEntries RPC sent by a leader (More documentation below at [2])
@@ -146,20 +118,21 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	/*
-		update term + reset votedFor. Also assure node is in Follower state
-		= is needed in condition check to change state to Follower if node is candidate but
-		another node wins in the same term.
-	*/
+	//convert to follower. // Section 5.2
 	if args.Term >= rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.votedFor = -1
 
-		// persist to "disk" (disk = persister object)
-		rf.persist()
+		// new term => reset votedFor // section 5.2
+		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
+			// update reply
+			reply.Term = rf.currentTerm
+			rf.votedFor = -1
+
+			// persist to "disk" (disk = persister object)
+			rf.persist()
+		}
 
 		if rf.state != Follower {
-
 			rf.changeState(Follower)
 
 			// fmt.Printf(
@@ -173,11 +146,8 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		}
 	}
 
-	/*
-		even though node might not append now (ex: enters next if),
-		it heard from leader, so timer should be reset
-	*/
-	rf.lastAppend = time.Now()
+	// it heard from leader, so timer should be reset
+	rf.lastHeartBeat = time.Now()
 
 	lenOwnLog := len(rf.log)
 	if args.PrevLogIndex >= lenOwnLog {
@@ -194,8 +164,9 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	// mismatch between logs
 	termAtLeaderIndex := rf.log[args.PrevLogIndex].Term
+
+	// mismatch between logs
 	if termAtLeaderIndex != args.PrevLogTerm {
 		// used for log reconciliation optimization
 		reply.TermAtLeaderIndex = termAtLeaderIndex
