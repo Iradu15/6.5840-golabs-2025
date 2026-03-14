@@ -59,6 +59,15 @@ type Raft struct {
 	*/
 	replicating []bool
 
+	/*
+		used such that a partitioned node step down by itself.
+		Caveat:
+			if at least one node responds to leader in same term,
+			considers it's still leader, but would need a majority
+			in fact, not only one: [oldLeader, s1], [s2....sn, n >= 3]
+	*/
+	lastQuorumAck time.Time
+
 	applyCh chan raftapi.ApplyMsg
 }
 
@@ -87,10 +96,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Fig2: RequestVote RPC: rule 2
 	if (rf.votedFor == args.CandidateId || rf.votedFor == -1) &&
 		rf.atLeastUpToDate(args.LastLogIndex, args.LastLogTerm) {
-		
+
 		// [Documentation Below (-1) ] valid RPC received
 		rf.lastHeartBeat = time.Now()
-		
+
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		log.Printf("%v accepted request vote from %v \n", rf.me, args.CandidateId)
@@ -219,11 +228,14 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 // reconcileLog reconciles the local log with a batch of new entries starting at the given index.
 //
 // It implements the conflict resolution logic required by Raft:
+//
 //  1. Conflict Detection: It compares existing entries with the new entries.
 //     If a mismatch is found, it truncates the local
 //     log at the point of conflict and appends the rest of the new entries.
+//
 //  2. Log Extension: If the new entries extend beyond the current log length
 //     (and no conflicts were found), the remaining entries are appended.
+//
 //  3. Commit Safety: In the event of a conflict, it rolls back the commitIndex
 //     to the last matching entry to ensure safety before the new uncommitted
 //     entries are added.
@@ -378,6 +390,12 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		return
 	}
 
+	/*
+		Reset quorum timer due to response from peer.
+		No point in updating if step down (after replyTerm > term)
+	*/
+	rf.lastQuorumAck = time.Now()
+
 	if !replySuccess {
 		// Optimize nextIndex search and retry the AppendEntries RPC next time the ticker fires until logs match
 
@@ -466,6 +484,9 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 func (rf *Raft) becomeLeader() {
 	log.Printf("[Leader] S%d T%d: Won election and became Leader \n", rf.me, rf.currentTerm)
 
+	// reset quorum timer
+	rf.lastQuorumAck = time.Now()
+
 	rf.changeState(Leader)
 
 	// reinitialize arrays Fig2: State
@@ -521,7 +542,6 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 
 		// fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", candidateId, term, peer, replyTerm)
 
-		// persist to "disk" (disk = persister object)
 		rf.persist()
 
 		return
@@ -597,8 +617,19 @@ func (rf *Raft) ticker() {
 		if rf.state == Leader {
 			currentTerm := rf.currentTerm
 
+			/*
+				Optimization such that partitioned leader steps down
+				It is safe to step down to same term because meanwhile the other servers
+				started an election and incremented the term
+			*/
+			if rf.timePassedSince(rf.lastQuorumAck) > time.Duration(2*rf.electionTimeout*int(time.Millisecond)) {
+				rf.stepDown(rf.currentTerm)
+				rf.mu.Unlock()
+				continue
+			}
+
 			// needed not to spam with a lot of goroutines that send heartbeat
-			if rf.timePassedSince(rf.lastHeartBeatSent) > time.Duration(rf.heartBeatInterval) {
+			if rf.timePassedSince(rf.lastHeartBeatSent) > time.Duration(rf.heartBeatInterval*int(time.Millisecond)) {
 
 				rf.lastHeartBeatSent = time.Now()
 				commitIndex := rf.commitIndex
@@ -623,13 +654,13 @@ func (rf *Raft) ticker() {
 		}
 
 		// More documentation below at [3]
-		if rf.timePassedSince(rf.lastAppend) > time.Duration(rf.electionTimeout*int(time.Millisecond)) {
+		if rf.timePassedSince(rf.lastHeartBeat) > time.Duration(rf.electionTimeout*int(time.Millisecond)) {
 			/*
 				update timer here (not in startElection) because go goroutine() schedules it,
 				not starts it, what if queue is big, the goroutine might not start and the election
 				timeout passes again and the timer is not updated in the goroutine
 			*/
-			rf.lastAppend = time.Now()
+			rf.lastHeartBeat = time.Now()
 			rf.currentTerm += 1
 			currentTerm := rf.currentTerm
 
@@ -847,7 +878,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.state = Follower
 
-	rf.lastAppend = time.Now()
+	rf.lastHeartBeat = time.Now()
 	rf.lastHeartBeatSent = time.Now()
 	rf.heartBeatInterval = 100
 
@@ -902,6 +933,17 @@ func (rf *Raft) killed() bool {
 }
 
 /*
+	[-1]
+		section 5.2 "valid RPC from leader/candidate"
+
+		If you reset your timer every time a "lagging" candidate
+		asked for a vote, a broken or slow node could
+		indefinitely prevent a leader from being elected by
+		repeatedly sending "valid" but "unvotable" requests.
+
+		Also a partitioned candidate will skyrocket his term and
+		when coming back it will send requestVote that will be rejected
+
 	[0]
 		example code to send a RequestVote RPC to a server.
 		server is the index of the target server in rf.peers[].
