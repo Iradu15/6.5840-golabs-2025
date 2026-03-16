@@ -573,25 +573,9 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 	}
 }
 
-func (rf *Raft) startElection(term int) {
-	rf.mu.Lock()
+func (rf *Raft) startElection(term int, lastLogIndex int, lastLogTerm int, candidateId int) {
 
-	// fmt.Printf("[ElectionStarted] S%v T%v \n", rf.me, rf.currentTerm)
-
-	rf.changeState(Candidate)
-
-	rf.votedFor = rf.me
-	rf.votesReceived = 1
-
-	rf.persist()
-
-	lastLogIndex := rf.getLastLogIndex()
-	lastLogTerm := rf.getLastLogTerm()
-	candidateId := rf.me
-
-	rf.mu.Unlock()
-
-	// fmt.Printf("[VoteSend] S%d T%d: started issuing request Votes\n", candidateId, rf.currentTerm)
+	// log.Printf("[ElectionStarted] S%v T%v \n", rf.me, rf.currentTerm)
 
 	for peerId := range rf.peers {
 
@@ -663,9 +647,23 @@ func (rf *Raft) ticker() {
 			rf.currentTerm += 1
 			currentTerm := rf.currentTerm
 
+			// critical: between incrementing term and starting election, it might receive RPC with
+			// higher term and step down, so it needs to check for that in the goroutine
+			rf.changeState(Candidate)
+			rf.votedFor = rf.me
+
+			rf.persist()
+
+			lastLogIndex := rf.getLastLogIndex()
+			lastLogTerm := rf.getLastLogTerm()
+			candidateId := rf.me
+
+			rf.votesReceived = 1 // vote for self
+
 			rf.mu.Unlock()
 
-			go rf.startElection(currentTerm)
+			go rf.startElection(currentTerm, lastLogIndex, lastLogTerm, candidateId)
+
 			continue
 		}
 
