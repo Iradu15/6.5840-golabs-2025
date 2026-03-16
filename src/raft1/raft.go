@@ -189,9 +189,15 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	reply.Success = true
 
-	// update log entries
+	// update log entries and persist changes
 	startIndex := args.PrevLogIndex + 1
 	reply.AppendNeeded = rf.reconcileLog(startIndex, args.Entries)
+	if reply.AppendNeeded {
+		rf.persist()
+	}
+
+	// update commitIndex if needed
+	rf.commitIndex = min(max(rf.commitIndex, args.LeaderCommit), len(rf.log)-1)
 
 	// no entries to commit, already up to date
 	if rf.commitIndex >= args.LeaderCommit {
