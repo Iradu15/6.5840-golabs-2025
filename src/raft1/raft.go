@@ -348,7 +348,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
 
-	// NOTE: this does NOT copy, it passes a pointer, so later it can be modified even if inside lock
+	// NOTE: copy, DO NOT pass a pointer, so later it can be modified even if inside lock
 	// SOLUTION: deep copy: https://gemini.google.com/share/957cda6db728
 	entriesToBeSent := rf.log[nextIndex:]
 	entries := make([]LogEntry, len(entriesToBeSent))
@@ -398,7 +398,6 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	if !replySuccess {
 		// Optimize nextIndex search and retry the AppendEntries RPC next time the ticker fires until logs match
-
 		oldNextIndex := rf.nextIndex[peer]
 		termAtFollowerFirstIndex := rf.log[reply.IndexOfFirstTermAtLeaderIndex].Term
 		if termAtFollowerFirstIndex == reply.TermAtLeaderIndex {
@@ -618,7 +617,7 @@ func (rf *Raft) ticker() {
 			currentTerm := rf.currentTerm
 
 			/*
-				Optimization such that partitioned leader steps down
+				Optimization such that partitioned leader steps down by itself.
 				It is safe to step down to same term because meanwhile the other servers
 				started an election and incremented the term
 			*/
@@ -687,21 +686,8 @@ func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg, peer int, term int) {
 //  2. Issue AppendEntries RPCs in parallel to replicate the entry.
 //  3. (Might not happen) When the entry has been safely replicated (as described
 //     below), the leader applies the entry to its state machine and returns the
-//     result of that execution to the client.
-func (rf *Raft) handleReplicateCommand() {
-	rf.mu.Lock()
-
-	term := rf.currentTerm
-	commitIndex := rf.commitIndex
-	leaderId := rf.me
-
-	lenEntries := len(rf.log)
-
-	rf.nextIndex[rf.me] = lenEntries
-	rf.matchIndex[rf.me] = lenEntries - 1
-
-	rf.mu.Unlock()
-
+//     result of that execution to the client. (done in handleAppendEntry())
+func (rf *Raft) handleReplicateCommand(term int, commitIndex int, leaderId int) {
 	for peerId := range rf.peers {
 
 		if peerId == leaderId {
@@ -710,36 +696,6 @@ func (rf *Raft) handleReplicateCommand() {
 
 		go rf.handleAppendEntry(peerId, term, leaderId, commitIndex)
 	}
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	maxCommitIndex := rf.getMaxCommittedIndex()
-
-	if rf.commitIndex >= maxCommitIndex {
-		return
-	}
-
-	// update commitIndex value and apply uncommitted values
-
-	for index := rf.commitIndex; index <= maxCommitIndex; index++ {
-
-		command := rf.log[index].Command
-		commandIndex := index
-		applyMsg := raftapi.ApplyMsg{
-			CommandValid:  true,
-			Command:       command,
-			CommandIndex:  commandIndex,
-			SnapshotValid: false,
-			Snapshot:      []byte{},
-			SnapshotTerm:  -1,
-			SnapshotIndex: -1,
-		}
-
-		rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
-	}
-
-	rf.commitIndex = maxCommitIndex
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -785,16 +741,23 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	// persist to "disk" (disk = persister object)
 	rf.persist()
 
-	go rf.handleReplicateCommand()
+	// Update nextIndex and matchIndex for itself, so when it sends AppendEntries to followers,
+	// it will know that it is already replicated on itself
+	rf.nextIndex[rf.me] = lenEntries
+	rf.matchIndex[rf.me] = lenEntries - 1
 
 	term = rf.currentTerm
 	index = lenEntries - 1
+
+	go rf.handleReplicateCommand(term, rf.commitIndex, rf.me)
 
 	return index, term, isLeader
 }
 
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
+// It is critical that is sync: if async-persist and crash, you could double vote
+// in the same term twice
 // see paper's Figure 2 for a description of what should be persistent.
 // before you've implemented snapshots, you should pass nil as the
 // second argument to persister.Save().
