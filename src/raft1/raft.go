@@ -495,7 +495,8 @@ func (rf *Raft) becomeLeader() {
 	lastLogIndex := rf.getLastLogIndex()
 
 	for i := range rf.peers {
-		rf.nextIndex[i] = max(1, lastLogIndex)
+		// figure 2: volatile state on leaders
+		rf.nextIndex[i] = max(1, lastLogIndex + 1)
 		rf.matchIndex[i] = 0
 		// reset replicating
 		rf.replicating[i] = false
