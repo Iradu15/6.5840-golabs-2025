@@ -52,10 +52,6 @@ func (rf *Raft) getLogTermForIndex(index int) int {
 	return term
 }
 
-func (rf *Raft) getNextLogIndex(peer int) int {
-	return rf.nextIndex[peer]
-}
-
 // moreUpToDate checks if the candidate is more up to date than the current server.
 //
 // Up to date is defined by comparing the index and term of the last entries.
@@ -142,7 +138,7 @@ func (rf *Raft) getFirstIndexOfGivenTerm(startPosition int, term int) int {
 		fmt.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 	}
 
-	for index := startPosition; index < 0; index-- {
+	for index := startPosition; index > 0; index-- {
 		if rf.log[index].Term != term {
 			return index + 1
 		}
