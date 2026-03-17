@@ -163,5 +163,11 @@ func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
 		}
 	}
 
+	if rf.log[len(rf.log)-1].Term == term {
+		return len(rf.log) - 1
+	}
+
+	log.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+
 	return 1
 }
