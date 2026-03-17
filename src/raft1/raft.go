@@ -367,8 +367,10 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	ok := rf.sendAppendEntry(peer, &args, &reply)
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// reset replicating flag
 	rf.replicating[peer] = false
-	rf.mu.Unlock()
 
 	if !ok {
 		/*
@@ -377,15 +379,13 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			=> lots of goroutines trying to reach same peer
 		*/
 		// log.Printf("[HeartBeatError] %v did not respond to heartbeat from %v \n", peer, leaderId)
+
 		return
 	}
 
 	replySuccess := reply.Success
 	replyTerm := reply.Term
 	replyAppendNeeded := reply.AppendNeeded
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if replyTerm > term {
 		// fmt.Printf("[StepDown] S%d T%d: (Peer S%d replied with higher Term %d)\n", leaderId, term, peer, replyTerm)
@@ -502,7 +502,7 @@ func (rf *Raft) becomeLeader() {
 
 	for i := range rf.peers {
 		// figure 2: volatile state on leaders
-		rf.nextIndex[i] = max(1, lastLogIndex + 1)
+		rf.nextIndex[i] = max(1, lastLogIndex+1)
 		rf.matchIndex[i] = 0
 		// reset replicating
 		rf.replicating[i] = false
