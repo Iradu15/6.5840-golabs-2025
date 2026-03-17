@@ -372,6 +372,21 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	// reset replicating flag
 	rf.replicating[peer] = false
 
+	/*
+		Check if peer is still leader.
+		Possible causes to lose leadership:
+			1. Higher term received in reply, step down and convert to follower
+			2. Partitioned from majority, step down by itself after timeout
+			3. etc
+		Check current term to prevent processing stale replies that were sent before step down and new re-election
+			1. Leader sends AppendEntries in term 5
+			2. While RPC is in flight, leader steps down (receives higher term 6)
+			3. Leader gets re-elected in term 7
+	*/
+	if rf.state != Leader || rf.currentTerm != term {
+		return
+	}
+
 	if !ok {
 		/*
 			Do not retry in loop because it will block this thread, then after some time
