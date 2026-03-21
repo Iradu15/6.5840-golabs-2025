@@ -488,10 +488,10 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	// Update matchIndex to what we just sent
 	// Update nextIndex to matchIndex + 1
 	newMatchIndex := prevLogIndex + len(entries)
-	rf.matchIndex[peer] = newMatchIndex
+	rf.matchIndex[peer] = max(rf.matchIndex[peer], newMatchIndex)
 
 	oldNextIndex := rf.nextIndex[peer]
-	rf.nextIndex[peer] = newMatchIndex + 1
+	rf.nextIndex[peer] = max(rf.nextIndex[peer], newMatchIndex+1)
 
 	log.Printf(
 		"[NextIndexUpdate]: S%v updated nextIndex from %v to %v because entries %v \n",
