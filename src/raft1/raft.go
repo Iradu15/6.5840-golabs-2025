@@ -29,10 +29,6 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
 	majority        int
 	electionTimeout int // amount of time it waits until starting new election
 
@@ -67,6 +63,13 @@ type Raft struct {
 			in fact, not only one: [oldLeader, s1], [s2....sn, n >= 3]
 	*/
 	lastQuorumAck time.Time
+
+	/*
+		Used for exclusive applying while not holding the primary lock.
+		Primary lock should be freed while applying because there might not be
+		someone at the other edge of the channel to read
+	*/
+	applyMu sync.Mutex
 
 	applyCh chan raftapi.ApplyMsg
 }
@@ -196,39 +199,27 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.persist()
 	}
 
-	// update commitIndex if needed
+	/*
+		Update commitIndex if needed.
+		Cap it to len(rf.log) -1 because later: rf.lastApplied = rf.commitIndex and entries that are not in
+		peer's log would be skipped when applying
+	*/
 	rf.commitIndex = min(max(rf.commitIndex, args.LeaderCommit), len(rf.log)-1)
 
-	// no entries to commit, already up to date
-	if rf.commitIndex >= args.LeaderCommit {
+	// no entries to apply, already up to date
+	if rf.lastApplied == rf.commitIndex {
 		return
 	}
 
-	// commit remaining entries
-	for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
+	entries := rf.prepareEntriesForApply(rf.lastApplied+1, rf.commitIndex)
+	// save commitIndex such that is protected while releasing lock
+	commitIndex := rf.commitIndex
 
-		applyMsg := raftapi.ApplyMsg{
-			CommandValid:  true,
-			Command:       rf.log[index].Command,
-			CommandIndex:  index,
-			SnapshotValid: false,
-			Snapshot:      []byte{},
-			SnapshotTerm:  -1,
-			SnapshotIndex: -1,
-		}
+	currentTerm := rf.currentTerm
+	peerId := rf.me
 
-		rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
-	}
-
-	oldCommitIndex := rf.commitIndex
-	rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-	fmt.Printf(
-		"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
-		rf.me,
-		rf.currentTerm,
-		oldCommitIndex,
-		rf.commitIndex,
-	)
+	// apply remaining entries
+	go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
 }
 
 // reconcileLog reconciles the local log with a batch of new entries starting at the given index.
@@ -283,26 +274,26 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 			rf.log,
 		)
 
+		//NOTE: I dont think is correct [PULA PULA]
 		/*
 			decrement commitIndex until last entry that matches, those that will be replaced / added
 			are not yet committed
 		*/
-		oldCommitIndex := rf.commitIndex
-		rf.commitIndex = startIndex + index - 1
-		fmt.Printf(
-			"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
-			rf.me,
-			rf.currentTerm,
-			oldCommitIndex,
-			rf.commitIndex,
-		)
+		// oldCommitIndex := rf.commitIndex
+		// rf.commitIndex = startIndex + index - 1
+		// fmt.Printf(
+		// 	"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
+		// 	rf.me,
+		// 	rf.currentTerm,
+		// 	oldCommitIndex,
+		// 	rf.commitIndex,
+		// )
 
 		break
 	}
 
 	// append possible remaining elements from args
 	if lenArgsEntries > remainingLen {
-
 		appendNeeded = true
 
 		remainingElements := argsEntries[remainingLen:]
@@ -312,6 +303,58 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	}
 
 	return appendNeeded
+}
+
+func (rf *Raft) applyEntries(
+	entries []raftapi.ApplyMsg,
+	peerId int,
+	currentTerm int,
+	commitIndex int,
+) {
+	rf.applyMu.Lock()
+	defer rf.applyMu.Unlock()
+
+	rf.mu.Lock()
+	// ignore if already applied
+	lastApplied := rf.lastApplied
+	if lastApplied >= commitIndex {
+		rf.mu.Unlock()
+		return
+	}
+
+	rf.mu.Unlock()
+
+	/*
+		Edge case:
+		- RPC 1 arrives, updates commitIndex to 5 + applies [1, 2, 3, 4, 5] in Goroutine 1.
+		- RPC 2 arrives, updates commitIndex to 6. lastApplied is still 0 because Goroutine 1 hasn't finished.
+			It prepares a new entries slice holding [1, 2, 3, 4, 5, 6]. It spawns Goroutine 2.
+			Goroutine 2 gets applyMu. It checks lastApplied >= commitIndex (5 >= 6, false). It then loops over its
+			pre-prepared slice and sends [1, 2, 3, 4, 5, 6] to the channel.Your state machine just received duplicates
+			of entries 1 through 5.
+	*/
+	entriesApplied := len(entries)
+	for _, applyMsg := range entries {
+		if applyMsg.CommandIndex <= lastApplied {
+			entriesApplied -= 1
+			continue
+		}
+		rf.sendApplyMsg(applyMsg, peerId, currentTerm)
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	log.Printf(
+		"[LastAppliedUpdate] S%vT%v applied %v entries from %v \n",
+		peerId,
+		currentTerm,
+		entriesApplied,
+		lastApplied,
+	)
+
+	rf.lastApplied = commitIndex
+
 }
 
 // More documentation below at [0]
@@ -459,37 +502,36 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	)
 
 	maxCommitIndex := rf.getMaxCommittedIndex()
-	// update commitIndex value and apply uncommitted values
-	if maxCommitIndex > rf.commitIndex {
 
-		for index := rf.lastApplied + 1; index <= rf.commitIndex; index++ {
-
-			command := rf.log[index].Command
-			commandIndex := index
-			applyMsg := raftapi.ApplyMsg{
-				CommandValid:  true,
-				Command:       command,
-				CommandIndex:  commandIndex,
-				SnapshotValid: false,
-				Snapshot:      []byte{},
-				SnapshotTerm:  -1,
-				SnapshotIndex: -1,
-			}
-
-			rf.sendApplyMsg(applyMsg, rf.me, rf.currentTerm)
-		}
-
+	// update commitIndex if needed
+	// Section 5.4.2, only consider entries committed by count from current term
+	if rf.log[maxCommitIndex].Term == rf.currentTerm {
 		oldCommitIndex := rf.commitIndex
-		rf.commitIndex = maxCommitIndex
-
-		fmt.Printf(
-			"[CommitIndexUpdate] S%vT%v updated from %v to %v \n",
-			rf.me,
-			rf.currentTerm,
-			oldCommitIndex,
-			rf.commitIndex,
-		)
+		rf.commitIndex = max(rf.commitIndex, maxCommitIndex)
+		if oldCommitIndex != rf.commitIndex {
+			log.Printf(
+				"[CommitIndexUpdate]: S%vT%v updated commitIndex from %v to %v \n",
+				leaderId,
+				term,
+				oldCommitIndex,
+				rf.commitIndex,
+			)
+		}
 	}
+
+	if rf.lastApplied == rf.commitIndex {
+		return
+	}
+
+	applyEntries := rf.prepareEntriesForApply(rf.lastApplied+1, rf.commitIndex)
+	// save commitIndex such that is protected while releasing lock
+	commitIndex := rf.commitIndex
+
+	currentTerm := rf.currentTerm
+	peerId := rf.me
+
+	// apply remaining entries
+	go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
 
 	log.Printf(
 		"[ReplicateSuccess] S%vT%v replicated %v on S%v \n",
@@ -870,6 +912,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.replicating = make([]bool, len(peers))
 
 	rf.applyCh = applyCh
+	rf.applyMu = sync.Mutex{}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
