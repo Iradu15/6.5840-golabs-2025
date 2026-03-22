@@ -5,6 +5,8 @@ import (
 	"log"
 	"slices"
 	"time"
+
+	"6.5840/raftapi"
 )
 
 // Debugging
@@ -170,4 +172,20 @@ func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
 	log.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 
 	return 1
+}
+
+// prepareEntriesForApply returns copy of entries that will be applied
+func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.ApplyMsg {
+	var entries []raftapi.ApplyMsg
+
+	for index := startIndex; index <= endIndex; index++ {
+
+		entries = append(entries, raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[index].Command,
+			CommandIndex: index,
+		})
+	}
+
+	return entries
 }
