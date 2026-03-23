@@ -470,7 +470,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 				nextIndex-1,
 			)
 		} else {
-			rf.nextIndex[peer] = reply.IndexOfFirstTermAtLeaderIndex
+			rf.nextIndex[peer] = min(reply.IndexOfFirstTermAtLeaderIndex, nextIndex - 1)
 		}
 
 		log.Printf(
@@ -598,6 +598,11 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// Discard stale replies from a previous term's election
+	if rf.state != Candidate || rf.currentTerm != term{
+		return
+	}
 
 	if replyTerm > term {
 		// step down and convert back to follower
