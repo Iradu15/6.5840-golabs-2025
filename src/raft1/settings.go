@@ -41,6 +41,8 @@ type AppendEntryReply struct {
 	// used for log reconciliation optimization
 	TermAtLeaderIndex             int
 	IndexOfFirstTermAtLeaderIndex int
+	OutOfBounds                   bool
+	Len int
 }
 
 type State int
