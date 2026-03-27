@@ -333,10 +333,10 @@ func (rf *Raft) applyEntries(
 			pre-prepared slice and sends [1, 2, 3, 4, 5, 6] to the channel.Your state machine just received duplicates
 			of entries 1 through 5.
 	*/
-	entriesApplied := len(entries)
+	entriesToBeApplied := len(entries)
 	for _, applyMsg := range entries {
 		if applyMsg.CommandIndex <= lastApplied {
-			entriesApplied -= 1
+			entriesToBeApplied -= 1
 			continue
 		}
 		rf.sendApplyMsg(applyMsg, peerId, currentTerm)
@@ -349,7 +349,7 @@ func (rf *Raft) applyEntries(
 		"[LastAppliedUpdate] S%vT%v applied %v entries from %v \n",
 		peerId,
 		currentTerm,
-		entriesApplied,
+		entriesToBeApplied,
 		lastApplied,
 	)
 
@@ -600,7 +600,7 @@ func (rf *Raft) handleRequestVote(peer int, term int, lastLogIndex int, lastLogT
 	defer rf.mu.Unlock()
 
 	// Discard stale replies from a previous term's election
-	if rf.state != Candidate || rf.currentTerm != term{
+	if rf.state != Candidate || rf.currentTerm != term {
 		return
 	}
 
