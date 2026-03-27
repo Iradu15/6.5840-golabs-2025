@@ -203,8 +203,12 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		Update commitIndex if needed.
 		Cap it to len(rf.log) -1 because later: rf.lastApplied = rf.commitIndex and entries that are not in
 		peer's log would be skipped when applying
+
+		lastEntrySentByLeader is useful only when leader sends batches of entries, 
+		not [nextIndex[peer], its last entry].
 	*/
-	rf.commitIndex = min(max(rf.commitIndex, args.LeaderCommit), len(rf.log)-1)
+	lastEntrySentByLeader := min(args.LeaderCommit, args.PrevLogIndex + len(args.Entries))
+	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), len(rf.log)-1)
 
 	// no entries to apply, already up to date
 	if rf.lastApplied == rf.commitIndex {
