@@ -208,10 +208,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		Cap it to len(rf.log) -1 because later: rf.lastApplied = rf.commitIndex and entries that are not in
 		peer's log would be skipped when applying
 
-		lastEntrySentByLeader is useful only when leader sends batches of entries, 
+		lastEntrySentByLeader is useful only when leader sends batches of entries,
 		not [nextIndex[peer], its last entry].
 	*/
-	lastEntrySentByLeader := min(args.LeaderCommit, args.PrevLogIndex + len(args.Entries))
+	lastEntrySentByLeader := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), len(rf.log)-1)
 
 	// no entries to apply, already up to date
@@ -806,9 +806,10 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	defer rf.mu.Unlock()
 
 	if rf.state != Leader {
-		isLeader = false
 		return index, term, isLeader
 	}
+
+	isLeader = true
 
 	// add entry to log. It needs to be quick, can't wait for the goroutine to execute
 	lenEntries := len(rf.log)
