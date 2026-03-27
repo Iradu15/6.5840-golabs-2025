@@ -794,7 +794,7 @@ func (rf *Raft) handleReplicateCommand(term int, commitIndex int, leaderId int) 
 func (rf *Raft) Start(command any) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (3B).
 
