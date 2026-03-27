@@ -121,6 +121,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	reply.AppendNeeded = false
+	reply.OutOfBounds = false
 
 	// reject appendEntry request (Fig2): requester is behind term wise
 	if rf.currentTerm > args.Term {
@@ -169,6 +170,9 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		currentPosition := lenOwnLog - 1
 		reply.TermAtLeaderIndex = lastTerm
 		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(currentPosition, lastTerm)
+
+		reply.Len = lenOwnLog
+		reply.OutOfBounds = true
 
 		log.Printf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, len(rf.log))
@@ -472,9 +476,15 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			rf.nextIndex[peer] = min(
 				rf.getLastIndexOfGivenTerm(reply.IndexOfFirstTermAtLeaderIndex, termAtFollowerFirstIndex)+1,
 				nextIndex-1,
+				rf.nextIndex[peer], // never go UP from current value
 			)
 		} else {
-			rf.nextIndex[peer] = min(reply.IndexOfFirstTermAtLeaderIndex, nextIndex - 1)
+			rf.nextIndex[peer] = min(reply.IndexOfFirstTermAtLeaderIndex, nextIndex-1, rf.nextIndex[peer])
+		}
+
+		// do not go further than the follower log len
+		if reply.OutOfBounds {
+			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.Len)
 		}
 
 		log.Printf(
