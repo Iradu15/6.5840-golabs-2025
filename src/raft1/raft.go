@@ -343,6 +343,18 @@ func (rf *Raft) applyEntries(
 	*/
 	entriesToBeApplied := len(entries)
 	for _, applyMsg := range entries {
+		/*
+			Do not keep sending if the server is NOT alive anymore.
+			new rfsrv is created, but goroutine from old server(this one) keeps
+			sending entries to the old applyCh.
+			applier of the old rfsrv only stops when the channel is closed. 
+			Nobody closes the old applyCh — Kill() just sets rf.dead = 1 and rs.raft = nil. 
+			So the old applier keeps reading from the old channel as long as old Raft goroutines 
+			keep sending to it.  
+		*/
+		if rf.killed() {
+			return
+		}
 		if applyMsg.CommandIndex <= lastApplied {
 			entriesToBeApplied -= 1
 			continue
@@ -395,11 +407,11 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		return
 	}
 
-	if rf.replicating[peer] {
-		rf.mu.Unlock()
-		return
-	}
-	rf.replicating[peer] = true
+	// if rf.replicating[peer] {
+	// 	rf.mu.Unlock()
+	// 	return
+	// }
+	// rf.replicating[peer] = true
 
 	nextIndex := rf.nextIndex[peer]
 	prevLogIndex := nextIndex - 1
@@ -421,7 +433,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	defer rf.mu.Unlock()
 
 	// reset replicating flag
-	rf.replicating[peer] = false
+	// rf.replicating[peer] = false
 
 	/*
 		Check if peer is still leader.
@@ -576,7 +588,7 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[i] = max(1, lastLogIndex+1)
 		rf.matchIndex[i] = 0
 		// reset replicating
-		rf.replicating[i] = false
+		// rf.replicating[i] = false
 	}
 }
 
@@ -930,7 +942,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.log = append(rf.log, LogEntry{Term: 0})
 
-	rf.replicating = make([]bool, len(peers))
+	// rf.replicating = make([]bool, len(peers))
 
 	rf.applyCh = applyCh
 	rf.applyMu = sync.Mutex{}

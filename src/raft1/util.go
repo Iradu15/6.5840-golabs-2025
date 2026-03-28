@@ -125,7 +125,7 @@ func (rf *Raft) getMaxCommittedIndex() int {
 
 	res := copySlice[rf.majority-1]
 
-	log.Printf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
+	DPrintf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
 
 	return res
 }
