@@ -52,8 +52,9 @@ type Raft struct {
 	/*
 		per-peer flag to prevent concurrent AppendEntries
 		only used for TestRPCBytes3B test that counts how many bytes are sent
+		Removed due to network failure cases blocking other goroutines
 	*/
-	replicating []bool
+	// replicating []bool
 
 	/*
 		used such that a partitioned node step down by itself.
@@ -171,7 +172,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.TermAtLeaderIndex = lastTerm
 		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(currentPosition, lastTerm)
 
-		reply.Len = lenOwnLog
+		reply.FollowerLogLen = lenOwnLog
 		reply.OutOfBounds = true
 
 		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
@@ -496,7 +497,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 		// do not go further than the follower log len
 		if reply.OutOfBounds {
-			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.Len)
+			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLogLen)
 		}
 
 		DPrintf(

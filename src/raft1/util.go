@@ -149,14 +149,14 @@ func (rf *Raft) getFirstIndexOfGivenTerm(startPosition int, term int) int {
 	return 1
 }
 
-// getLastIndexOfGivenTerm returns the index of the first occurrence of a
+// getLastIndexOfGivenTerm returns the index of the last occurrence of a
 // given term in own log.
 //
 // Used for log reconciliation optimization
 func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
 	// pay attention to startPosition, otherwise it might never find sought value
 	if rf.log[startPosition].Term != term {
-		fmt.Printf("[StartPosition Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+		log.Printf("[StartPosition Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 	}
 
 	for index := startPosition; index < len(rf.log); index++ {

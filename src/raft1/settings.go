@@ -42,7 +42,8 @@ type AppendEntryReply struct {
 	TermAtLeaderIndex             int
 	IndexOfFirstTermAtLeaderIndex int
 	OutOfBounds                   bool
-	Len int
+	// FollowerLogLen is the follower's log length, used for out-of-bounds handling.
+	FollowerLogLen int
 }
 
 type State int
