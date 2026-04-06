@@ -37,6 +37,13 @@ type AppendEntryReply struct {
 			Append entries was not refused, but no entries were appended because already up to date
 	*/
 	AppendNeeded bool
+
+	// used for log reconciliation optimization
+	TermAtLeaderIndex             int
+	IndexOfFirstTermAtLeaderIndex int
+	OutOfBounds                   bool
+	// FollowerLogLen is the follower's log length, used for out-of-bounds handling.
+	FollowerLogLen int
 }
 
 type State int
@@ -58,4 +65,11 @@ type LogEntry struct {
 	Command interface{}
 	Term    int
 	Index   int // relevant? I dont think so, can be taken from the entries
+}
+
+type PersistentRaftState struct {
+	// PersistData holds data that needs to be persistent (Fig2 paper)
+	Logs        []LogEntry
+	CurrentTerm int
+	VotedFor    int
 }

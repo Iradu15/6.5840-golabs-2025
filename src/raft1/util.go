@@ -5,6 +5,8 @@ import (
 	"log"
 	"slices"
 	"time"
+
+	"6.5840/raftapi"
 )
 
 // Debugging
@@ -50,10 +52,6 @@ func (rf *Raft) getLogTermForIndex(index int) int {
 	term := indexEntry.Term
 
 	return term
-}
-
-func (rf *Raft) getNextLogIndex(peer int) int {
-	return rf.nextIndex[peer]
 }
 
 // moreUpToDate checks if the candidate is more up to date than the current server.
@@ -127,7 +125,67 @@ func (rf *Raft) getMaxCommittedIndex() int {
 
 	res := copySlice[rf.majority-1]
 
-	fmt.Printf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
+	DPrintf("[MaxCommitIndexValue] res: %v (out of %v) \n", res, rf.matchIndex)
 
 	return res
+}
+
+// getFirstIndexOfGivenTerm returns the index of the first occurrence of a
+// given term in own log.
+//
+// Used for log reconciliation optimization
+func (rf *Raft) getFirstIndexOfGivenTerm(startPosition int, term int) int {
+	// pay attention to startPosition, otherwise it might never find sought value
+	if rf.log[startPosition].Term != term {
+		fmt.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+	}
+
+	for index := startPosition; index > 0; index-- {
+		if rf.log[index].Term != term {
+			return index + 1
+		}
+	}
+
+	return 1
+}
+
+// getLastIndexOfGivenTerm returns the index of the last occurrence of a
+// given term in own log.
+//
+// Used for log reconciliation optimization
+func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
+	// pay attention to startPosition, otherwise it might never find sought value
+	if rf.log[startPosition].Term != term {
+		log.Printf("[StartPosition Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+	}
+
+	for index := startPosition; index < len(rf.log); index++ {
+		if rf.log[index].Term != term {
+			return index - 1
+		}
+	}
+
+	if rf.log[len(rf.log)-1].Term == term {
+		return len(rf.log) - 1
+	}
+
+	log.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
+
+	return 1
+}
+
+// prepareEntriesForApply returns copy of entries that will be applied
+func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.ApplyMsg {
+	var entries []raftapi.ApplyMsg
+
+	for index := startIndex; index <= endIndex; index++ {
+
+		entries = append(entries, raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[index].Command,
+			CommandIndex: index,
+		})
+	}
+
+	return entries
 }
