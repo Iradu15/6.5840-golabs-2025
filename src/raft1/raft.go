@@ -73,6 +73,12 @@ type Raft struct {
 	applyMu sync.Mutex
 
 	applyCh chan raftapi.ApplyMsg
+
+	/*
+		offset from snapshotting. If log starts with index 6 and you want to access element with index 7, then
+		7-6+1 = 2, second slot
+	*/
+	lastIncludedIndex int
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -163,16 +169,18 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	// it heard from leader, so timer should be reset
 	rf.lastHeartBeat = time.Now()
 
-	lenOwnLog := len(rf.log)
-	if args.PrevLogIndex >= lenOwnLog {
+	lastIndex := rf.getLastLogIndex()
+	if args.PrevLogIndex > lastIndex {
 
 		// used for log reconciliation optimization
 		lastTerm := rf.getLastLogTerm()
-		currentPosition := lenOwnLog - 1
 		reply.TermAtLeaderIndex = lastTerm
-		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(currentPosition, lastTerm)
+		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(
+			len(rf.log)-1,
+			lastTerm,
+		) + rf.lastIncludedIndex
 
-		reply.FollowerLogLen = lenOwnLog
+		reply.FollowerLastIndex = rf.getLastLogIndex()
 		reply.OutOfBounds = true
 
 		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
@@ -181,13 +189,16 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	termAtLeaderIndex := rf.log[args.PrevLogIndex].Term
+	termAtLeaderIndex := rf.log[rf.logAt(args.PrevLogIndex)].Term
 
 	// mismatch between logs
 	if termAtLeaderIndex != args.PrevLogTerm {
 		// used for log reconciliation optimization
 		reply.TermAtLeaderIndex = termAtLeaderIndex
-		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(args.PrevLogIndex, termAtLeaderIndex)
+		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(
+			rf.logAt(args.PrevLogIndex),
+			termAtLeaderIndex,
+		) + rf.lastIncludedIndex
 
 		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d at Index %d (Have Term %d, Leader Expects %d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, termAtLeaderIndex, args.PrevLogTerm)
@@ -206,14 +217,14 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	/*
 		Update commitIndex if needed.
-		Cap it to len(rf.log) -1 because later: rf.lastApplied = rf.commitIndex and entries that are not in
+		Cap it to lastIndex because later: rf.lastApplied = rf.commitIndex and entries that are not in
 		peer's log would be skipped when applying
 
 		lastEntrySentByLeader is useful only when leader sends batches of entries,
 		not [nextIndex[peer], its last entry].
 	*/
 	lastEntrySentByLeader := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
-	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), len(rf.log)-1)
+	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), lastIndex)
 
 	// no entries to apply, already up to date
 	if rf.lastApplied == rf.commitIndex {
@@ -250,7 +261,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	appendNeeded := false
 
-	remainingLen := len(rf.log) - startIndex
+	remainingLen := rf.getLastLogIndex() - startIndex + 1
 	lenArgsEntries := len(argsEntries)
 
 	/*
@@ -262,7 +273,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	*/
 	for index := range min(remainingLen, lenArgsEntries) {
 
-		entry := rf.log[startIndex+index]
+		entry := rf.log[rf.logAt(startIndex+index)]
 		argEntry := argsEntries[index]
 
 		if entry.Term == argEntry.Term {
@@ -271,8 +282,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 
 		// discard everything and append rest of logs from args
 		appendNeeded = true
-		rf.log = append(rf.log[:startIndex+index], argsEntries[index:]...)
-		lenArgsEntries = 0
+		rf.log = append(rf.log[:rf.logAt(startIndex+index)], argsEntries[index:]...)
 
 		DPrintf(
 			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
@@ -302,7 +312,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	}
 
 	// append possible remaining elements from args
-	if lenArgsEntries > remainingLen {
+	if !appendNeeded && lenArgsEntries > remainingLen {
 		appendNeeded = true
 
 		remainingElements := argsEntries[remainingLen:]
@@ -348,10 +358,10 @@ func (rf *Raft) applyEntries(
 			Do not keep sending if the server is NOT alive anymore.
 			new rfsrv is created, but goroutine from old server(this one) keeps
 			sending entries to the old applyCh.
-			applier of the old rfsrv only stops when the channel is closed. 
-			Nobody closes the old applyCh — Kill() just sets rf.dead = 1 and rs.raft = nil. 
-			So the old applier keeps reading from the old channel as long as old Raft goroutines 
-			keep sending to it.  
+			applier of the old rfsrv only stops when the channel is closed.
+			Nobody closes the old applyCh — Kill() just sets rf.dead = 1 and rs.raft = nil.
+			So the old applier keeps reading from the old channel as long as old Raft goroutines
+			keep sending to it.
 		*/
 		if rf.killed() {
 			return
@@ -416,11 +426,11 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	nextIndex := rf.nextIndex[peer]
 	prevLogIndex := nextIndex - 1
-	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
+	prevLogTerm := rf.getLogTermForIndex(rf.logAt(prevLogIndex))
 
 	// NOTE: copy, DO NOT pass a pointer, so later it can be modified even if inside lock
 	// SOLUTION: deep copy: https://gemini.google.com/share/957cda6db728
-	entriesToBeSent := rf.log[nextIndex:]
+	entriesToBeSent := rf.log[rf.logAt(nextIndex):]
 	entries := make([]LogEntry, len(entriesToBeSent))
 	copy(entries, entriesToBeSent)
 
@@ -484,20 +494,20 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	if !replySuccess {
 		// Optimize nextIndex search and retry the AppendEntries RPC next time the ticker fires until logs match
 		oldNextIndex := rf.nextIndex[peer]
-		termAtFollowerFirstIndex := rf.log[reply.IndexOfFirstTermAtLeaderIndex].Term
+		termAtFollowerFirstIndex := rf.log[rf.logAt(reply.IndexOfFirstTermAtLeaderIndex)].Term
 		if termAtFollowerFirstIndex == reply.TermAtLeaderIndex {
 			rf.nextIndex[peer] = min(
-				rf.getLastIndexOfGivenTerm(reply.IndexOfFirstTermAtLeaderIndex, termAtFollowerFirstIndex)+1,
+				rf.getLastIndexOfGivenTerm(rf.logAt(reply.IndexOfFirstTermAtLeaderIndex), termAtFollowerFirstIndex)+1,
 				nextIndex-1,
 				rf.nextIndex[peer], // never go UP from current value
-			)
+			) + rf.lastIncludedIndex
 		} else {
 			rf.nextIndex[peer] = min(reply.IndexOfFirstTermAtLeaderIndex, nextIndex-1, rf.nextIndex[peer])
 		}
 
-		// do not go further than the follower log len
+		// do not go further than the follower last index
 		if reply.OutOfBounds {
-			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLogLen)
+			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLastIndex)
 		}
 
 		DPrintf(
@@ -532,7 +542,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	// update commitIndex if needed
 	// Section 5.4.2, only consider entries committed by count from current term
-	if rf.log[maxCommitIndex].Term == rf.currentTerm {
+	if rf.log[rf.logAt(maxCommitIndex)].Term == rf.currentTerm {
 		oldCommitIndex := rf.commitIndex
 		rf.commitIndex = max(rf.commitIndex, maxCommitIndex)
 		if oldCommitIndex != rf.commitIndex {
@@ -825,11 +835,11 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	isLeader = true
 
 	// add entry to log. It needs to be quick, can't wait for the goroutine to execute
-	lenEntries := len(rf.log)
+	lastIndex := rf.getLastLogIndex()
 
-	entry := LogEntry{command, rf.currentTerm, lenEntries}
+	entry := LogEntry{command, rf.currentTerm, lastIndex + 1}
 	rf.log = append(rf.log, entry)
-	lenEntries += 1
+	lastIndex += 1
 
 	// log.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
 	DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, entry)
@@ -839,15 +849,14 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 
 	// Update nextIndex and matchIndex for itself, so when it sends AppendEntries to followers,
 	// it will know that it is already replicated on itself
-	rf.nextIndex[rf.me] = lenEntries
-	rf.matchIndex[rf.me] = lenEntries - 1
+	rf.nextIndex[rf.me] = lastIndex+1
+	rf.matchIndex[rf.me] = lastIndex
 
 	term = rf.currentTerm
-	index = lenEntries - 1
 
 	go rf.handleReplicateCommand(term, rf.commitIndex, rf.me)
 
-	return index, term, isLeader
+	return lastIndex, term, isLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -941,7 +950,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastHeartBeatSent = time.Now()
 	rf.heartBeatInterval = 100
 
-	rf.log = append(rf.log, LogEntry{Term: 0})
+	// offset from snapshotting
+	rf.lastIncludedIndex = 0
+
+	rf.log = append(rf.log, LogEntry{Term: 0, Index: 0})
 
 	// rf.replicating = make([]bool, len(peers))
 
@@ -962,6 +974,42 @@ func (rf *Raft) PersistBytes() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	currentTerm := rf.currentTerm
+
+	resp.Term = currentTerm
+
+	if args.Term < currentTerm {
+		return
+	}
+
+	if args.Offset == 0 {
+		// create new snapshot file =
+	}
+
+	// write args.data into file at given offset
+
+	if !args.Done {
+		return
+	}
+
+	// save snapshot file
+	// discard all snapshots with smaller index
+
+	// make method with binary search in utils to find specific entry
+	// If existing log entry has same index and term as snapshot’s
+	// last included entry, retain log entries following it and reply
+
+	// discard entire log
+	rf.log = []LogEntry{}
+
+	// reset state + cluster config(peers) using the snapshot
+
 }
 
 // the service says it has created a snapshot that has

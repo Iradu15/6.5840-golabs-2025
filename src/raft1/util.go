@@ -10,7 +10,7 @@ import (
 )
 
 // Debugging
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -20,7 +20,8 @@ func DPrintf(format string, a ...interface{}) {
 
 func (rf *Raft) getLastLogIndex() int {
 	entries := rf.log
-	lastLogIndex := len(entries) - 1
+	lastLog := entries[len(entries)-1]
+	lastLogIndex := lastLog.Index
 
 	return lastLogIndex
 }
@@ -31,14 +32,6 @@ func (rf *Raft) getLastLogTerm() int {
 	lastLogTerm := lastLog.Term
 
 	return lastLogTerm
-}
-
-func (rf *Raft) getLastLogCommand() any {
-	entries := rf.log
-	lastLog := entries[len(entries)-1]
-	lastLogCommand := lastLog.Command
-
-	return lastLogCommand
 }
 
 func (rf *Raft) getLogTermForIndex(index int) int {
@@ -182,10 +175,17 @@ func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.A
 
 		entries = append(entries, raftapi.ApplyMsg{
 			CommandValid: true,
-			Command:      rf.log[index].Command,
+			Command:      rf.log[rf.logAt(index)].Command,
 			CommandIndex: index,
 		})
 	}
 
 	return entries
+}
+
+// logAt returns the index of the log where raftIndex is places
+// 
+// Ex: log: [6,7,8] and searching for index 7: 7-6 = 1
+func (rf *Raft) logAt(raftIndex int) int{
+	return raftIndex - rf.lastIncludedIndex
 }
