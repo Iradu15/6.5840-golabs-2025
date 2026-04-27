@@ -77,8 +77,8 @@ type PersistentRaftState struct {
 type InstallSnapshotArgs struct {
 	Term              int
 	LeaderId          int
-	lastIncludedIndex int
-	lastIncludedTerm  int
+	LastIncludedIndex int
+	LastIncludedTerm  int
 	Offset            int
 	Data              []byte
 	Done              bool
