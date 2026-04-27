@@ -183,9 +183,14 @@ func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.A
 	return entries
 }
 
-// logAt returns the index of the log where raftIndex is places
-// 
-// Ex: log: [6,7,8] and searching for index 7: 7-6 = 1
+// logAt returns the index into rf.log for the given Raft log index.
+//
+// Invariant: after snapshotting, rf.log[0] corresponds to the entry at
+// rf.lastIncludedIndex. That means a Raft log index is converted to an
+// offset in rf.log by subtracting rf.lastIncludedIndex.
+//
+// Example: if rf.log[0] is the entry for index 6, then the entry for Raft
+// index 7 is at rf.log[1], because 7-6 == 1
 func (rf *Raft) logAt(raftIndex int) int{
 	return raftIndex - rf.lastIncludedIndex
 }
