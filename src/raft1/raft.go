@@ -76,7 +76,7 @@ type Raft struct {
 
 	/*
 		offset from snapshotting. If log starts with index 6 and you want to access element with index 7, then
-		7-6+1 = 2, second slot
+		7-6 = 1, second slot
 	*/
 	lastIncludedIndex int
 }
@@ -223,6 +223,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		lastEntrySentByLeader is useful only when leader sends batches of entries,
 		not [nextIndex[peer], its last entry].
 	*/
+	lastIndex = rf.getLastLogIndex()
 	lastEntrySentByLeader := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
 	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), lastIndex)
 
