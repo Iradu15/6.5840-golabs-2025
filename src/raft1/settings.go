@@ -72,6 +72,8 @@ type PersistentRaftState struct {
 	Logs        []LogEntry
 	CurrentTerm int
 	VotedFor    int
+	LastIncludedIndex int // 
+	LastIncludedTerm int
 }
 
 type InstallSnapshotArgs struct {

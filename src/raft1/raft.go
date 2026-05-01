@@ -79,6 +79,8 @@ type Raft struct {
 		7-6 = 1, second slot
 	*/
 	lastIncludedIndex int
+	lastIncludedTerm  int
+	snapshot          []byte
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -144,6 +146,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		// new term => reset votedFor // section 5.2
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
+
 			// update reply
 			reply.Term = rf.currentTerm
 			rf.votedFor = -1
@@ -154,15 +157,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 		if rf.state != Follower {
 			rf.changeState(Follower)
-
-			// fmt.Printf(
-			// 	"[ConvertToFollower (heartbeat)] S%vT%v steps down from %v due to S%vT%v\n",
-			// 	rf.me,
-			// 	rf.currentTerm,
-			// 	rf.state,
-			// 	args.LeaderId,
-			// 	args.Term,
-			// )
 		}
 	}
 
@@ -232,7 +226,14 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	entries := rf.prepareEntriesForApply(rf.lastApplied+1, rf.commitIndex)
+	/*
+		Snapshot is only applied on already applied Entries(FACT, check where Snapshot() is called)
+		Applying entries happens in a goroutine, so lastApplies might be not updated yet
+		but the entries are applied, so Snapshot was called on an entry older than lastApplied.
+		Trying to access entries that are not in the log anymore, they are in the
+		snapshot will get outOfBounds
+	*/
+	entries := rf.prepareEntriesForApply(max(rf.lastApplied, rf.lastIncludedIndex)+1, rf.commitIndex)
 	// save commitIndex such that is protected while releasing lock
 	commitIndex := rf.commitIndex
 
@@ -382,7 +383,7 @@ func (rf *Raft) applyEntries(
 		peerId,
 		currentTerm,
 		entriesToBeApplied,
-		lastApplied,
+		lastApplied+1,
 	)
 
 	rf.lastApplied = commitIndex
@@ -428,7 +429,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	nextIndex := rf.nextIndex[peer]
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(rf.logAt(prevLogIndex))
-
+	
 	// NOTE: copy, DO NOT pass a pointer, so later it can be modified even if inside lock
 	// SOLUTION: deep copy: https://gemini.google.com/share/957cda6db728
 	entriesToBeSent := rf.log[rf.logAt(nextIndex):]
@@ -561,7 +562,14 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		return
 	}
 
-	applyEntries := rf.prepareEntriesForApply(rf.lastApplied+1, rf.commitIndex)
+	/*
+		Snapshot is only applied on already applied Entries(FACT, check where Snapshot() is called)
+		Applying entries happens in a goroutine, so lastApplies might be not updated yet
+		but the entries are applied, so Snapshot was called on an entry older than lastApplied.
+		Trying to access entries that are not in the log anymore, they are in the
+		snapshot will get outOfBounds
+	*/
+	applyEntries := rf.prepareEntriesForApply(max(rf.lastApplied, rf.lastIncludedIndex)+1, rf.commitIndex)
 	// save commitIndex such that is protected while releasing lock
 	commitIndex := rf.commitIndex
 
@@ -850,7 +858,7 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 
 	// Update nextIndex and matchIndex for itself, so when it sends AppendEntries to followers,
 	// it will know that it is already replicated on itself
-	rf.nextIndex[rf.me] = lastIndex+1
+	rf.nextIndex[rf.me] = lastIndex + 1
 	rf.matchIndex[rf.me] = lastIndex
 
 	term = rf.currentTerm
@@ -873,7 +881,13 @@ func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	enc := labgob.NewEncoder(w)
 
-	persistentRaftState := PersistentRaftState{Logs: rf.log, CurrentTerm: rf.currentTerm, VotedFor: rf.votedFor}
+	persistentRaftState := PersistentRaftState{
+		Logs:              rf.log,
+		CurrentTerm:       rf.currentTerm,
+		VotedFor:          rf.votedFor,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+	}
 
 	err := enc.Encode(&persistentRaftState)
 	if err != nil {
@@ -884,7 +898,7 @@ func (rf *Raft) persist() {
 
 	raftStateBytes := w.Bytes()
 
-	rf.persister.Save(raftStateBytes, nil)
+	rf.persister.Save(raftStateBytes, rf.snapshot)
 
 	// Example:
 	// w := new(bytes.Buffer)
@@ -896,9 +910,14 @@ func (rf *Raft) persist() {
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshotData []byte) {
 	// on fresh start, no data to read
 	if data == nil || len(data) < 1 {
+
+		// dummy entry (in case log is not persisted, otherwise it is already included)
+		rf.log = append(rf.log, LogEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex})
+		// rf.replicating = make([]bool, len(peers))
+
 		DPrintf("S%vT%v has no data from persister\n", rf.me, rf.currentTerm)
 		return
 	}
@@ -920,6 +939,11 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.log = raftStateStruct.Logs
 	rf.currentTerm = raftStateStruct.CurrentTerm
 	rf.votedFor = raftStateStruct.VotedFor
+
+	// snapshotting
+	rf.lastIncludedIndex = raftStateStruct.LastIncludedIndex
+	rf.lastIncludedTerm = raftStateStruct.LastIncludedTerm
+	rf.snapshot = snapshotData
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -953,16 +977,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// offset from snapshotting
 	rf.lastIncludedIndex = 0
-
-	rf.log = append(rf.log, LogEntry{Term: 0, Index: 0})
-
-	// rf.replicating = make([]bool, len(peers))
+	rf.lastIncludedTerm = 0
 
 	rf.applyCh = applyCh
 	rf.applyMu = sync.Mutex{}
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -1018,8 +1039,26 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	/*
+		Remove logs up to and including index.
+		Keep first index the dummy entry(needs to have the correct term)
+		when looking at prevLogTerm
+	*/
+	rf.log = rf.log[rf.logAt(index):]
+
+	// reset rf.lastIncluded
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.log[0].Term
+
+	// remove other older snapshots
+	rf.snapshot = snapshot
+
+	rf.persist()
+
+	DPrintf("[Snapshot] S%vT%v: index:%v log:%v \n", rf.me, rf.currentTerm, index, rf.log)
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
