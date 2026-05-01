@@ -286,7 +286,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 		rf.log = append(rf.log[:rf.logAt(startIndex+index)], argsEntries[index:]...)
 
 		DPrintf(
-			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
+			"[LogAppend] S%vT%v: updated via reconcile from %v with %v. Now %v \n",
 			rf.me,
 			rf.currentTerm,
 			startIndex+index,
@@ -319,7 +319,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 		remainingElements := argsEntries[remainingLen:]
 		rf.log = append(rf.log, remainingElements...)
 
-		DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, remainingElements)
+		DPrintf("[LogAppend] S%vT%v: added via reconcile %v.\n", rf.me, rf.currentTerm, remainingElements)
 	}
 
 	return appendNeeded
@@ -532,7 +532,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	rf.nextIndex[peer] = max(rf.nextIndex[peer], newMatchIndex+1)
 
 	DPrintf(
-		"[NextIndexUpdate]: S%v updated nextIndex from %v to %v because entries %v \n",
+		"[NextIndexUpdate]: updated nextIndex for S%v from %v to %v because entries %v \n",
 		peer,
 		oldNextIndex,
 		rf.nextIndex[peer],
@@ -842,8 +842,8 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	rf.log = append(rf.log, entry)
 	lastIndex += 1
 
-	// log.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
-	DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, entry)
+	DPrintf("[LogAppend] S%vT%v: added via Start %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
+	// DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, entry)
 
 	// persist to "disk" (disk = persister object)
 	rf.persist()
@@ -870,8 +870,6 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-
 	w := new(bytes.Buffer)
 	enc := labgob.NewEncoder(w)
 
@@ -881,6 +879,8 @@ func (rf *Raft) persist() {
 	if err != nil {
 		log.Printf("[EncodeError] S%vT%v: err for %v: %v\n", rf.me, rf.currentTerm, persistentRaftState, err)
 	}
+
+	DPrintf("[Persist] S%vT%v Encoded %v \n", rf.me, rf.currentTerm, persistentRaftState)
 
 	raftStateBytes := w.Bytes()
 
