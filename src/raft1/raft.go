@@ -172,7 +172,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(
 			len(rf.log)-1,
 			lastTerm,
-		) + rf.lastIncludedIndex
+		)
 
 		reply.FollowerLastIndex = rf.getLastLogIndex()
 		reply.OutOfBounds = true
@@ -192,7 +192,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(
 			rf.logAt(args.PrevLogIndex),
 			termAtLeaderIndex,
-		) + rf.lastIncludedIndex
+		)
 
 		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d at Index %d (Have Term %d, Leader Expects %d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, termAtLeaderIndex, args.PrevLogTerm)
@@ -499,10 +499,13 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		termAtFollowerFirstIndex := rf.log[rf.logAt(reply.IndexOfFirstTermAtLeaderIndex)].Term
 		if termAtFollowerFirstIndex == reply.TermAtLeaderIndex {
 			rf.nextIndex[peer] = min(
-				rf.getLastIndexOfGivenTerm(rf.logAt(reply.IndexOfFirstTermAtLeaderIndex), termAtFollowerFirstIndex)+1,
+				rf.getLastIndexOfGivenTerm(
+					rf.logAt(reply.IndexOfFirstTermAtLeaderIndex),
+					termAtFollowerFirstIndex,
+				)+1,
 				nextIndex-1,
 				rf.nextIndex[peer], // never go UP from current value
-			) + rf.lastIncludedIndex
+			)
 		} else {
 			rf.nextIndex[peer] = min(reply.IndexOfFirstTermAtLeaderIndex, nextIndex-1, rf.nextIndex[peer])
 		}

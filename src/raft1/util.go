@@ -10,7 +10,7 @@ import (
 )
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -133,13 +133,24 @@ func (rf *Raft) getFirstIndexOfGivenTerm(startPosition int, term int) int {
 		fmt.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 	}
 
-	for index := startPosition; index > 0; index-- {
+	if rf.log[0].Term == term {
+		return rf.log[0].Index
+	}
+
+	for index := startPosition; index >= 0; index-- {
 		if rf.log[index].Term != term {
-			return index + 1
+			return rf.log[index].Index + 1
 		}
 	}
 
-	return 1
+	log.Fatalf(
+		"[getFirstIndexOfGivenTerm] err for startPosition %v, term %v and log: %v \n",
+		startPosition,
+		term,
+		rf.log,
+	)
+
+	panic("Error: getFirstIndexOfGivenTerm unreachable")
 }
 
 // getLastIndexOfGivenTerm returns the index of the last occurrence of a
@@ -152,19 +163,21 @@ func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
 		log.Printf("[StartPosition Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 	}
 
-	for index := startPosition; index < len(rf.log); index++ {
+	lenLog := len(rf.log)
+
+	if rf.log[lenLog-1].Term == term {
+		return rf.log[lenLog-1].Index
+	}
+
+	for index := startPosition; index < lenLog; index++ {
 		if rf.log[index].Term != term {
-			return index - 1
+			return rf.log[index].Index - 1
 		}
 	}
 
-	if rf.log[len(rf.log)-1].Term == term {
-		return len(rf.log) - 1
-	}
+	log.Fatalf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 
-	log.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
-
-	return 1
+	panic("Error: getLastIndexOfGivenTerm unreachable")
 }
 
 // prepareEntriesForApply returns copy of entries that will be applied
@@ -191,6 +204,6 @@ func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.A
 //
 // Example: if rf.log[0] is the entry for index 6, then the entry for Raft
 // index 7 is at rf.log[1], because 7-6 == 1
-func (rf *Raft) logAt(raftIndex int) int{
+func (rf *Raft) logAt(raftIndex int) int {
 	return raftIndex - rf.lastIncludedIndex
 }
