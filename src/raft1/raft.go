@@ -526,17 +526,34 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	}
 
 	lenEntries := len(entries)
-	if !replyAppendNeeded || lenEntries == 0 {
-		return
-	}
+
+	/*
+		On a successful reply, the follower's log matches the leader's up to
+		prevLogIndex + len(entries) — regardless of whether the follower had
+		to mutate its log (replyAppendNeeded). We must still update matchIndex
+		and nextIndex; otherwise the leader's view of the follower stays
+		frozen and commitIndex can never advance via this peer.
+	*/
 
 	// Update matchIndex to what we just sent
 	// Update nextIndex to matchIndex + 1
-	newMatchIndex := prevLogIndex + len(entries)
+	newMatchIndex := prevLogIndex + lenEntries
 	rf.matchIndex[peer] = max(rf.matchIndex[peer], newMatchIndex)
 
 	oldNextIndex := rf.nextIndex[peer]
 	rf.nextIndex[peer] = max(rf.nextIndex[peer], newMatchIndex+1)
+
+	if !replyAppendNeeded || lenEntries == 0 {
+		DPrintf(
+			"[NoEntries] S%v->Peer:%v matchIndex=%v nextIndex=%v->%v (replyAppendNeeded:%v)\n",
+			rf.me,
+			peer,
+			rf.matchIndex[peer],
+			oldNextIndex,
+			rf.nextIndex[peer],
+			replyAppendNeeded,
+		)
+	}
 
 	DPrintf(
 		"[NextIndexUpdate]: updated nextIndex for S%v from %v to %v because entries %v \n",
