@@ -512,6 +512,9 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLastIndex)
 		}
 
+		// safety guard 
+		rf.nextIndex[peer] = max(rf.nextIndex[peer], 1)
+
 		DPrintf(
 			"[LogBackoff] S%d T%d: S%d rejected AppendEntries at PrevLogIndex %d. Decrement NextIndex from %d to %d\n",
 			leaderId, term, peer, prevLogIndex, oldNextIndex, rf.nextIndex[peer])
