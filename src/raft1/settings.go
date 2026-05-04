@@ -44,6 +44,7 @@ type AppendEntryReply struct {
 	OutOfBounds                   bool
 	// FollowerLastIndex is the follower's last index, used for out-of-bounds handling.
 	FollowerLastIndex int
+	NeedsInstallSnapshot bool
 }
 
 type State int

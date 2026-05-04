@@ -131,6 +131,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Success = false
 	reply.AppendNeeded = false
 	reply.OutOfBounds = false
+	reply.NeedsInstallSnapshot = false
 
 	// reject appendEntry request (Fig2): requester is behind term wise
 	if rf.currentTerm > args.Term {
@@ -179,6 +180,22 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, len(rf.log))
+
+		return
+	}
+
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		// prevLogIndex is too old, need to send InstallSnapshot RPC instead of AppendEntries
+		DPrintf(
+			"[StaleAppendEntryRPC] S%vT%v rejected AppendEntry from S%v because PrevLogIndex %v <= lastIncludedIndex %v \n",
+			rf.me,
+			rf.currentTerm,
+			args.LeaderId,
+			args.PrevLogIndex,
+			rf.lastIncludedIndex,
+		)
+
+		reply.NeedsInstallSnapshot = true
 
 		return
 	}
@@ -427,9 +444,16 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	// rf.replicating[peer] = true
 
 	nextIndex := rf.nextIndex[peer]
+	if nextIndex <= rf.lastIncludedIndex {
+		// nextIndex is too old, need to send InstallSnapshot RPC instead of AppendEntries
+		rf.mu.Unlock()
+		// rf.sendInstallSnapshot(peer)
+		return
+	}
+
 	prevLogIndex := nextIndex - 1
 	prevLogTerm := rf.getLogTermForIndex(rf.logAt(prevLogIndex))
-	
+
 	// NOTE: copy, DO NOT pass a pointer, so later it can be modified even if inside lock
 	// SOLUTION: deep copy: https://gemini.google.com/share/957cda6db728
 	entriesToBeSent := rf.log[rf.logAt(nextIndex):]
@@ -443,7 +467,6 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	ok := rf.sendAppendEntry(peer, &args, &reply)
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	// reset replicating flag
 	// rf.replicating[peer] = false
@@ -460,6 +483,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			3. Leader gets re-elected in term 7
 	*/
 	if rf.state != Leader || rf.currentTerm != term {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -469,8 +493,8 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			another goroutine will be scheduled to retry for the same peer, and so on
 			=> lots of goroutines trying to reach same peer
 		*/
-		// log.Printf("[HeartBeatError] %v did not respond to heartbeat from %v \n", peer, leaderId)
-
+		
+		rf.mu.Unlock()
 		return
 	}
 
@@ -484,6 +508,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 		rf.persist()
 
+		rf.mu.Unlock()
 		return
 	}
 
@@ -494,8 +519,17 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	rf.lastQuorumAck = time.Now()
 
 	if !replySuccess {
+
+		if reply.NeedsInstallSnapshot {
+
+			// rf.sendInstallSnapshot(peer)
+
+			rf.mu.Unlock()
+			return
+		}
+
 		// Optimize nextIndex search and retry the AppendEntries RPC next time the ticker fires until logs match
-		oldNextIndex := rf.nextIndex[peer]
+		oldNextIndex := nextIndex
 		termAtFollowerFirstIndex := rf.log[rf.logAt(reply.IndexOfFirstTermAtLeaderIndex)].Term
 		if termAtFollowerFirstIndex == reply.TermAtLeaderIndex {
 			rf.nextIndex[peer] = min(
@@ -515,13 +549,14 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLastIndex)
 		}
 
-		// safety guard 
+		// safety guard
 		rf.nextIndex[peer] = max(rf.nextIndex[peer], 1)
 
 		DPrintf(
 			"[LogBackoff] S%d T%d: S%d rejected AppendEntries at PrevLogIndex %d. Decrement NextIndex from %d to %d\n",
 			leaderId, term, peer, prevLogIndex, oldNextIndex, rf.nextIndex[peer])
 
+		rf.mu.Unlock()
 		return
 	}
 
@@ -553,15 +588,15 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			rf.nextIndex[peer],
 			replyAppendNeeded,
 		)
+	} else {
+		DPrintf(
+			"[NextIndexUpdate]: updated nextIndex for S%v from %v to %v because entries %v \n",
+			peer,
+			oldNextIndex,
+			rf.nextIndex[peer],
+			entries,
+		)
 	}
-
-	DPrintf(
-		"[NextIndexUpdate]: updated nextIndex for S%v from %v to %v because entries %v \n",
-		peer,
-		oldNextIndex,
-		rf.nextIndex[peer],
-		entries,
-	)
 
 	maxCommitIndex := rf.getMaxCommittedIndex()
 
@@ -582,6 +617,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	}
 
 	if rf.lastApplied == rf.commitIndex {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -610,6 +646,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		peer,
 	)
 
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) becomeLeader() {

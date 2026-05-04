@@ -38,7 +38,8 @@ func (rf *Raft) getLogTermForIndex(index int) int {
 	entries := rf.log
 
 	if index < 0 || index > len(entries)-1 {
-		return 0
+		log.Fatalf("[Error getLogTermForIndex]: invalid index %v for log: %v \n", index, entries)
+		panic("[Error getLogTermForIndex] invalid index")
 	}
 
 	indexEntry := entries[index]
