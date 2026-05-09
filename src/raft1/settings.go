@@ -82,9 +82,7 @@ type InstallSnapshotArgs struct {
 	LeaderId          int
 	LastIncludedIndex int
 	LastIncludedTerm  int
-	Offset            int
 	Data              []byte
-	Done              bool
 }
 
 type InstallSnapshotReply struct {
