@@ -208,3 +208,18 @@ func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.A
 func (rf *Raft) logAt(raftIndex int) int {
 	return raftIndex - rf.lastIncludedIndex
 }
+
+// isEntryPresent checks if the entry at the given Raft log index is present in rf.log.
+//
+// Returns a boolean indicating presence and the index in rf.log if present.
+func (rf *Raft) isEntryPresent(raftIndex int, term int) (bool, int) {
+	if raftIndex < rf.lastIncludedIndex || raftIndex > rf.getLastLogIndex() {
+		return false, -1
+	}
+
+	if rf.log[rf.logAt(raftIndex)].Term != term {
+		return false, -1
+	}
+
+	return true, rf.logAt(raftIndex)
+}
