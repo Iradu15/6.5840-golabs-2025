@@ -418,6 +418,11 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 	return ok
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshotRPC", args, reply)
+	return ok
+}
+
 // handleAppendEntry manages the transmission of an AppendEntry RPC to a single peer
 //
 // Dual purpose of this method:
@@ -446,8 +451,18 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	nextIndex := rf.nextIndex[peer]
 	if nextIndex <= rf.lastIncludedIndex {
 		// nextIndex is too old, need to send InstallSnapshot RPC instead of AppendEntries
+		args := InstallSnapshotArgs{
+			Term:              term,
+			LeaderId:          leaderId,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			Data:              rf.snapshot,
+		}
+		reply := InstallSnapshotReply{}
+
 		rf.mu.Unlock()
-		// rf.sendInstallSnapshot(peer)
+
+		rf.sendInstallSnapshot(peer, &args, &reply)
 		return
 	}
 
@@ -493,7 +508,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			another goroutine will be scheduled to retry for the same peer, and so on
 			=> lots of goroutines trying to reach same peer
 		*/
-		
+
 		rf.mu.Unlock()
 		return
 	}
@@ -522,9 +537,19 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 		if reply.NeedsInstallSnapshot {
 
-			// rf.sendInstallSnapshot(peer)
+			args := InstallSnapshotArgs{
+				Term:              term,
+				LeaderId:          leaderId,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm:  rf.lastIncludedTerm,
+				Data:              rf.snapshot,
+			}
+			reply := InstallSnapshotReply{}
 
 			rf.mu.Unlock()
+
+			rf.sendInstallSnapshot(peer, &args, &reply)
+
 			return
 		}
 
@@ -575,7 +600,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	newMatchIndex := prevLogIndex + lenEntries
 	rf.matchIndex[peer] = max(rf.matchIndex[peer], newMatchIndex)
 
-	oldNextIndex := rf.nextIndex[peer]
+	oldNextIndex := nextIndex
 	rf.nextIndex[peer] = max(rf.nextIndex[peer], newMatchIndex+1)
 
 	if !replyAppendNeeded || lenEntries == 0 {
@@ -637,14 +662,6 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	// apply remaining entries
 	go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
-
-	DPrintf(
-		"[ReplicateSuccess] S%vT%v replicated %v on S%v \n",
-		leaderId,
-		term,
-		lenEntries, // rf.log[len(rf.log)-lenEntries:]
-		peer,
-	)
 
 	rf.mu.Unlock()
 }
@@ -954,8 +971,6 @@ func (rf *Raft) persist() {
 		log.Printf("[EncodeError] S%vT%v: err for %v: %v\n", rf.me, rf.currentTerm, persistentRaftState, err)
 	}
 
-	DPrintf("[Persist] S%vT%v Encoded %v \n", rf.me, rf.currentTerm, persistentRaftState)
-
 	raftStateBytes := w.Bytes()
 
 	rf.persister.Save(raftStateBytes, rf.snapshot)
@@ -1004,6 +1019,10 @@ func (rf *Raft) readPersist(data []byte, snapshotData []byte) {
 	rf.lastIncludedIndex = raftStateStruct.LastIncludedIndex
 	rf.lastIncludedTerm = raftStateStruct.LastIncludedTerm
 	rf.snapshot = snapshotData
+	// commitIndex >= lastIncludedIndex because snapshot is created on already applied entries,
+	// so it is safe to update commitIndex to lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -1021,6 +1040,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+
+	// will be updated in readPersist if there is persisted state, otherwise = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
@@ -1063,35 +1084,81 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 	defer rf.mu.Unlock()
 
 	currentTerm := rf.currentTerm
-
 	resp.Term = currentTerm
 
-	if args.Term < currentTerm {
+	if args.Term > currentTerm {
+		// step down and convert back to follower
+		rf.stepDown(args.Term)
+		rf.persist()
+	} else if args.Term < currentTerm {
+		// outdated snapshot, ignore
+		DPrintf("[InstallSnapshot Reject] S%vT%v args.Term:%v currentTerm:%v\n", rf.me, currentTerm, args.Term, currentTerm)
 		return
 	}
 
-	if args.Offset == 0 {
-		// create new snapshot file =
-	}
-
-	// write args.data into file at given offset
-
-	if !args.Done {
+	if rf.commitIndex > args.LastIncludedIndex {
+		// reject snapshot, already have committed entries that are not included in the snapshot
+		// since restart
+		DPrintf(
+			"[InstallSnapshot Reject] S%vT%v commitIndex:%v > args.LastIncludedIndex:%v\n",
+			rf.me,
+			currentTerm,
+			rf.commitIndex,
+			args.LastIncludedIndex,
+		)
 		return
 	}
 
-	// save snapshot file
-	// discard all snapshots with smaller index
+	if rf.snapshot != nil && args.LastIncludedIndex <= rf.lastIncludedIndex {
+		// reject entry, current snapshot is more/as up to date than the one sent by the leader
+		DPrintf(
+			"[InstallSnapshot Reject] S%vT%v args.LastIncludedIndex:%v <= rf.lastIncludedIndex:%v\n",
+			rf.me,
+			currentTerm,
+			args.LastIncludedIndex,
+			rf.lastIncludedIndex,
+		)
+		return
+	}
 
-	// make method with binary search in utils to find specific entry
 	// If existing log entry has same index and term as snapshot’s
 	// last included entry, retain log entries following it and reply
+	ok, index := rf.isEntryPresent(args.LastIncludedIndex, args.LastIncludedTerm)
+	if !ok {
+		// otherwise, discard the entire log
+		rf.log = []LogEntry{{Command: nil, Term: args.LastIncludedTerm, Index: args.LastIncludedIndex}}
+	} else {
+		rf.log = rf.log[index:]
+	}
 
-	// discard entire log
-	rf.log = []LogEntry{}
+	DPrintf(
+		"[InstallSnapshot] S%vT%v discarded until %v NOW until: %v\n",
+		rf.me,
+		currentTerm,
+		args.LastIncludedIndex,
+		rf.getLastLogIndex(),
+	)
 
-	// reset state + cluster config(peers) using the snapshot
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.snapshot = args.Data
 
+	rf.persist()
+
+	applyEntries := make([]raftapi.ApplyMsg, 1)
+	applyEntries[0] = raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotIndex: args.LastIncludedIndex,
+		SnapshotTerm:  args.LastIncludedTerm,
+		CommandValid:  false,
+		Command:       nil,
+		CommandIndex:  args.LastIncludedIndex,
+	}
+	
+	peerId := rf.me
+
+	go rf.applyEntries(applyEntries, peerId, currentTerm, args.LastIncludedIndex)
 }
 
 // the service says it has created a snapshot that has
