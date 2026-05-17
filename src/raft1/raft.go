@@ -72,6 +72,8 @@ type Raft struct {
 	*/
 	applyMu sync.Mutex
 
+	wg sync.WaitGroup
+
 	applyCh chan raftapi.ApplyMsg
 
 	/*
@@ -258,6 +260,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	peerId := rf.me
 
 	// apply remaining entries
+	rf.wg.Add(1)
 	go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
 }
 
@@ -349,9 +352,11 @@ func (rf *Raft) applyEntries(
 	currentTerm int,
 	commitIndex int,
 ) {
+	defer rf.wg.Done()
+
 	rf.applyMu.Lock()
 	defer rf.applyMu.Unlock()
-
+	
 	rf.mu.Lock()
 	// ignore if already applied
 	lastApplied := rf.lastApplied
@@ -450,7 +455,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	nextIndex := rf.nextIndex[peer]
 	if nextIndex <= rf.lastIncludedIndex {
-		// nextIndex is too old, need to send InstallSnapshot RPC instead of AppendEntries
+		// nextIndex is too old(prevLogIndex would also be too old), need to send InstallSnapshot RPC instead of AppendEntries
 		args := InstallSnapshotArgs{
 			Term:              term,
 			LeaderId:          leaderId,
@@ -661,6 +666,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	peerId := rf.me
 
 	// apply remaining entries
+	rf.wg.Add(1)
 	go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
 
 	rf.mu.Unlock()
@@ -799,6 +805,7 @@ func (rf *Raft) ticker() {
 			*/
 			if rf.timePassedSince(rf.lastQuorumAck) > time.Duration(2*rf.electionTimeout*int(time.Millisecond)) {
 				rf.stepDown(rf.currentTerm)
+				DPrintf("[StepDown] S%d T%d: (Partitioned leader stepping down)\n", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 				continue
 			}
@@ -1063,6 +1070,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.applyMu = sync.Mutex{}
 
+	rf.wg = sync.WaitGroup{}
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
@@ -1155,9 +1164,10 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 		Command:       nil,
 		CommandIndex:  args.LastIncludedIndex,
 	}
-	
+
 	peerId := rf.me
 
+	rf.wg.Add(1)
 	go rf.applyEntries(applyEntries, peerId, currentTerm, args.LastIncludedIndex)
 }
 
@@ -1199,7 +1209,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	
+	rf.wg.Wait()
+
+	rf.applyCh <- raftapi.ApplyMsg{CommandValid: false}
 }
 
 func (rf *Raft) killed() bool {
