@@ -180,8 +180,8 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.FollowerLastIndex = rf.getLastLogIndex()
 		reply.OutOfBounds = true
 
-		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
-			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, len(rf.log))
+		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, firstEntry:%v, my len=%d)\n",
+			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, rf.log[0].Index, len(rf.log))
 
 		return
 	}
@@ -340,7 +340,13 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 		remainingElements := argsEntries[remainingLen:]
 		rf.log = append(rf.log, remainingElements...)
 
-		DPrintf("[LogAppend] S%vT%v: added via reconcile %v.\n", rf.me, rf.currentTerm, remainingElements)
+		DPrintf(
+			"[LogAppend] S%vT%v: added via reconcile %v. Now: %v \n",
+			rf.me,
+			rf.currentTerm,
+			remainingElements,
+			rf.log,
+		)
 	}
 
 	return appendNeeded
@@ -356,7 +362,7 @@ func (rf *Raft) applyEntries(
 
 	rf.applyMu.Lock()
 	defer rf.applyMu.Unlock()
-	
+
 	rf.mu.Lock()
 	// ignore if already applied
 	lastApplied := rf.lastApplied
@@ -632,7 +638,8 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	// update commitIndex if needed
 	// Section 5.4.2, only consider entries committed by count from current term
-	if rf.log[rf.logAt(maxCommitIndex)].Term == rf.currentTerm {
+	entryIndex := rf.logAt(maxCommitIndex)
+	if entryIndex >= 0 && rf.log[entryIndex].Term == rf.currentTerm {
 		oldCommitIndex := rf.commitIndex
 		rf.commitIndex = max(rf.commitIndex, maxCommitIndex)
 		if oldCommitIndex != rf.commitIndex {
@@ -1209,7 +1216,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	
+
 	rf.wg.Wait()
 
 	rf.applyCh <- raftapi.ApplyMsg{CommandValid: false}
