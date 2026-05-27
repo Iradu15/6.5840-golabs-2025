@@ -260,8 +260,11 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	peerId := rf.me
 
 	// apply remaining entries
-	rf.wg.Add(1)
-	go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
+	
+	if !rf.killed() {
+		rf.wg.Add(1)
+		go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
+	}
 }
 
 // reconcileLog reconciles the local log with a batch of new entries starting at the given index.
@@ -370,7 +373,6 @@ func (rf *Raft) applyEntries(
 		rf.mu.Unlock()
 		return
 	}
-
 	rf.mu.Unlock()
 
 	/*
@@ -673,8 +675,10 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	peerId := rf.me
 
 	// apply remaining entries
-	rf.wg.Add(1)
-	go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
+	if !rf.killed() {
+		rf.wg.Add(1)
+		go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
+	}
 
 	rf.mu.Unlock()
 }
@@ -918,8 +922,6 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := false
-
-	// Your code here (3B).
 
 	if rf.killed() {
 		return index, term, isLeader
@@ -1174,8 +1176,10 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 
 	peerId := rf.me
 
-	rf.wg.Add(1)
-	go rf.applyEntries(applyEntries, peerId, currentTerm, args.LastIncludedIndex)
+	if !rf.killed() {
+		rf.wg.Add(1)
+		go rf.applyEntries(applyEntries, peerId, currentTerm, args.LastIncludedIndex)
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -1216,6 +1220,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	
+	// used for building a happens-before relationship between WaitGroup Wait() and Add() 
+	rf.mu.Lock()
+	rf.mu.Unlock()
 
 	rf.wg.Wait()
 
