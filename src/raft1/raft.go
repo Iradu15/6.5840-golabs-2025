@@ -586,7 +586,10 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 		// do not go further than the follower last index
 		if reply.OutOfBounds {
-			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLastIndex)
+			rf.nextIndex[peer] = min(
+				rf.nextIndex[peer],
+				reply.FollowerLastIndex+1,
+			)
 		}
 
 		// safety guard
