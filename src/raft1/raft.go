@@ -1197,6 +1197,17 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		Keep first index the dummy entry(needs to have the correct term)
 		when looking at prevLogTerm
 	*/
+	if rf.logAt(index) < 0 {
+		DPrintf(
+			"[Snapshot Deny] S%vT%v - index %v. Already snapshotted until %v\n",
+			rf.me,
+			rf.currentTerm,
+			index,
+			rf.lastIncludedIndex,
+		)
+		return
+	}
+
 	rf.log = rf.log[rf.logAt(index):]
 
 	// reset rf.lastIncluded
