@@ -408,16 +408,18 @@ func (rf *Raft) applyEntries(
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf(
-		"[LastAppliedUpdate] S%vT%v applied %v entries from %v \n",
-		peerId,
-		currentTerm,
-		entriesToBeApplied,
-		lastApplied+1,
-	)
-
+	if entriesToBeApplied != 1 && !entries[0].SnapshotValid {
+		DPrintf(
+			"[LastAppliedUpdate] S%vT%v applied %v entries from %v \n",
+			peerId,
+			currentTerm,
+			entriesToBeApplied,
+			lastApplied+1,
+		)
+	} else {
+		DPrintf("[LastAppliedUpdate] S%vT%v applied snapshot. Now: %v \n", peerId, currentTerm, commitIndex)
+	}
 	rf.lastApplied = commitIndex
-
 }
 
 // More documentation below at [0]
@@ -548,7 +550,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 	if !replySuccess {
 
-		if reply.NeedsInstallSnapshot {
+		if reply.NeedsInstallSnapshot || rf.logAt(reply.IndexOfFirstTermAtLeaderIndex) < 0 {
 
 			args := InstallSnapshotArgs{
 				Term:              term,
