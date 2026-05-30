@@ -53,7 +53,7 @@ func (ts *Test) mksrv(ends []*labrpc.ClientEnd, grp tester.Tgid, srv int, persis
 	ts.mu.Lock()
 	ts.srvs[srv] = s
 	ts.mu.Unlock()
-	return []tester.IService{s, s.raft}
+	return []tester.IService{s.raft, s}
 }
 
 func (ts *Test) restart(i int) {

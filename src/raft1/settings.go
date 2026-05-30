@@ -42,8 +42,9 @@ type AppendEntryReply struct {
 	TermAtLeaderIndex             int
 	IndexOfFirstTermAtLeaderIndex int
 	OutOfBounds                   bool
-	// FollowerLogLen is the follower's log length, used for out-of-bounds handling.
-	FollowerLogLen int
+	// FollowerLastIndex is the follower's last index, used for out-of-bounds handling.
+	FollowerLastIndex int
+	NeedsInstallSnapshot bool
 }
 
 type State int
@@ -64,7 +65,7 @@ const (
 type LogEntry struct {
 	Command interface{}
 	Term    int
-	Index   int // relevant? I dont think so, can be taken from the entries
+	Index   int
 }
 
 type PersistentRaftState struct {
@@ -72,4 +73,18 @@ type PersistentRaftState struct {
 	Logs        []LogEntry
 	CurrentTerm int
 	VotedFor    int
+	LastIncludedIndex int // 
+	LastIncludedTerm int
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
 }

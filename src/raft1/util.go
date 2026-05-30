@@ -20,7 +20,8 @@ func DPrintf(format string, a ...interface{}) {
 
 func (rf *Raft) getLastLogIndex() int {
 	entries := rf.log
-	lastLogIndex := len(entries) - 1
+	lastLog := entries[len(entries)-1]
+	lastLogIndex := lastLog.Index
 
 	return lastLogIndex
 }
@@ -33,19 +34,12 @@ func (rf *Raft) getLastLogTerm() int {
 	return lastLogTerm
 }
 
-func (rf *Raft) getLastLogCommand() any {
-	entries := rf.log
-	lastLog := entries[len(entries)-1]
-	lastLogCommand := lastLog.Command
-
-	return lastLogCommand
-}
-
 func (rf *Raft) getLogTermForIndex(index int) int {
 	entries := rf.log
 
 	if index < 0 || index > len(entries)-1 {
-		return 0
+		log.Fatalf("[Error getLogTermForIndex]: invalid index %v for log: %v \n", index, entries)
+		panic("[Error getLogTermForIndex] invalid index")
 	}
 
 	indexEntry := entries[index]
@@ -140,13 +134,24 @@ func (rf *Raft) getFirstIndexOfGivenTerm(startPosition int, term int) int {
 		fmt.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 	}
 
-	for index := startPosition; index > 0; index-- {
+	if rf.log[0].Term == term {
+		return rf.log[0].Index
+	}
+
+	for index := startPosition; index >= 0; index-- {
 		if rf.log[index].Term != term {
-			return index + 1
+			return rf.log[index].Index + 1
 		}
 	}
 
-	return 1
+	log.Fatalf(
+		"[getFirstIndexOfGivenTerm] err for startPosition %v, term %v and log: %v \n",
+		startPosition,
+		term,
+		rf.log,
+	)
+
+	panic("Error: getFirstIndexOfGivenTerm unreachable")
 }
 
 // getLastIndexOfGivenTerm returns the index of the last occurrence of a
@@ -159,19 +164,21 @@ func (rf *Raft) getLastIndexOfGivenTerm(startPosition int, term int) int {
 		log.Printf("[StartPosition Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 	}
 
-	for index := startPosition; index < len(rf.log); index++ {
+	lenLog := len(rf.log)
+
+	if rf.log[lenLog-1].Term == term {
+		return rf.log[lenLog-1].Index
+	}
+
+	for index := startPosition; index < lenLog; index++ {
 		if rf.log[index].Term != term {
-			return index - 1
+			return rf.log[index].Index - 1
 		}
 	}
 
-	if rf.log[len(rf.log)-1].Term == term {
-		return len(rf.log) - 1
-	}
+	log.Fatalf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
 
-	log.Printf("[Error]: invalid startPosition:%v for T:%v\n", startPosition, term)
-
-	return 1
+	panic("Error: getLastIndexOfGivenTerm unreachable")
 }
 
 // prepareEntriesForApply returns copy of entries that will be applied
@@ -182,10 +189,37 @@ func (rf *Raft) prepareEntriesForApply(startIndex int, endIndex int) []raftapi.A
 
 		entries = append(entries, raftapi.ApplyMsg{
 			CommandValid: true,
-			Command:      rf.log[index].Command,
+			Command:      rf.log[rf.logAt(index)].Command,
 			CommandIndex: index,
 		})
 	}
 
 	return entries
+}
+
+// logAt returns the index into rf.log for the given Raft log index.
+//
+// Invariant: after snapshotting, rf.log[0] corresponds to the entry at
+// rf.lastIncludedIndex. That means a Raft log index is converted to an
+// offset in rf.log by subtracting rf.lastIncludedIndex.
+//
+// Example: if rf.log[0] is the entry for index 6, then the entry for Raft
+// index 7 is at rf.log[1], because 7-6 == 1
+func (rf *Raft) logAt(raftIndex int) int {
+	return raftIndex - rf.lastIncludedIndex
+}
+
+// isEntryPresent checks if the entry at the given Raft log index is present in rf.log.
+//
+// Returns a boolean indicating presence and the index in rf.log if present.
+func (rf *Raft) isEntryPresent(raftIndex int, term int) (bool, int) {
+	if raftIndex < rf.lastIncludedIndex || raftIndex > rf.getLastLogIndex() {
+		return false, -1
+	}
+
+	if rf.log[rf.logAt(raftIndex)].Term != term {
+		return false, -1
+	}
+
+	return true, rf.logAt(raftIndex)
 }

@@ -72,7 +72,17 @@ type Raft struct {
 	*/
 	applyMu sync.Mutex
 
+	wg sync.WaitGroup
+
 	applyCh chan raftapi.ApplyMsg
+
+	/*
+		offset from snapshotting. If log starts with index 6 and you want to access element with index 7, then
+		7-6 = 1, second slot
+	*/
+	lastIncludedIndex int
+	lastIncludedTerm  int
+	snapshot          []byte
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -123,6 +133,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Success = false
 	reply.AppendNeeded = false
 	reply.OutOfBounds = false
+	reply.NeedsInstallSnapshot = false
 
 	// reject appendEntry request (Fig2): requester is behind term wise
 	if rf.currentTerm > args.Term {
@@ -138,6 +149,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		// new term => reset votedFor // section 5.2
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
+
 			// update reply
 			reply.Term = rf.currentTerm
 			rf.votedFor = -1
@@ -148,46 +160,58 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 		if rf.state != Follower {
 			rf.changeState(Follower)
-
-			// fmt.Printf(
-			// 	"[ConvertToFollower (heartbeat)] S%vT%v steps down from %v due to S%vT%v\n",
-			// 	rf.me,
-			// 	rf.currentTerm,
-			// 	rf.state,
-			// 	args.LeaderId,
-			// 	args.Term,
-			// )
 		}
 	}
 
 	// it heard from leader, so timer should be reset
 	rf.lastHeartBeat = time.Now()
 
-	lenOwnLog := len(rf.log)
-	if args.PrevLogIndex >= lenOwnLog {
+	lastIndex := rf.getLastLogIndex()
+	if args.PrevLogIndex > lastIndex {
 
 		// used for log reconciliation optimization
 		lastTerm := rf.getLastLogTerm()
-		currentPosition := lenOwnLog - 1
 		reply.TermAtLeaderIndex = lastTerm
-		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(currentPosition, lastTerm)
+		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(
+			len(rf.log)-1,
+			lastTerm,
+		)
 
-		reply.FollowerLogLen = lenOwnLog
+		reply.FollowerLastIndex = rf.getLastLogIndex()
 		reply.OutOfBounds = true
 
-		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, my len=%d)\n",
-			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, len(rf.log))
+		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d (PrevLogIndex %d out of bounds, firstEntry:%v, my len=%d)\n",
+			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, rf.log[0].Index, len(rf.log))
 
 		return
 	}
 
-	termAtLeaderIndex := rf.log[args.PrevLogIndex].Term
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		// prevLogIndex is too old, need to send InstallSnapshot RPC instead of AppendEntries
+		DPrintf(
+			"[StaleAppendEntryRPC] S%vT%v rejected AppendEntry from S%v because PrevLogIndex %v <= lastIncludedIndex %v \n",
+			rf.me,
+			rf.currentTerm,
+			args.LeaderId,
+			args.PrevLogIndex,
+			rf.lastIncludedIndex,
+		)
+
+		reply.NeedsInstallSnapshot = true
+
+		return
+	}
+
+	termAtLeaderIndex := rf.log[rf.logAt(args.PrevLogIndex)].Term
 
 	// mismatch between logs
 	if termAtLeaderIndex != args.PrevLogTerm {
 		// used for log reconciliation optimization
 		reply.TermAtLeaderIndex = termAtLeaderIndex
-		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(args.PrevLogIndex, termAtLeaderIndex)
+		reply.IndexOfFirstTermAtLeaderIndex = rf.getFirstIndexOfGivenTerm(
+			rf.logAt(args.PrevLogIndex),
+			termAtLeaderIndex,
+		)
 
 		DPrintf("[AppendEntryReject] S%d T%d: Rejected S%d at Index %d (Have Term %d, Leader Expects %d)\n",
 			rf.me, rf.currentTerm, args.LeaderId, args.PrevLogIndex, termAtLeaderIndex, args.PrevLogTerm)
@@ -206,21 +230,29 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 
 	/*
 		Update commitIndex if needed.
-		Cap it to len(rf.log) -1 because later: rf.lastApplied = rf.commitIndex and entries that are not in
+		Cap it to lastIndex because later: rf.lastApplied = rf.commitIndex and entries that are not in
 		peer's log would be skipped when applying
 
 		lastEntrySentByLeader is useful only when leader sends batches of entries,
 		not [nextIndex[peer], its last entry].
 	*/
+	lastIndex = rf.getLastLogIndex()
 	lastEntrySentByLeader := min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
-	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), len(rf.log)-1)
+	rf.commitIndex = min(max(rf.commitIndex, lastEntrySentByLeader), lastIndex)
 
 	// no entries to apply, already up to date
 	if rf.lastApplied == rf.commitIndex {
 		return
 	}
 
-	entries := rf.prepareEntriesForApply(rf.lastApplied+1, rf.commitIndex)
+	/*
+		Snapshot is only applied on already applied Entries(FACT, check where Snapshot() is called)
+		Applying entries happens in a goroutine, so lastApplies might be not updated yet
+		but the entries are applied, so Snapshot was called on an entry older than lastApplied.
+		Trying to access entries that are not in the log anymore, they are in the
+		snapshot will get outOfBounds
+	*/
+	entries := rf.prepareEntriesForApply(max(rf.lastApplied, rf.lastIncludedIndex)+1, rf.commitIndex)
 	// save commitIndex such that is protected while releasing lock
 	commitIndex := rf.commitIndex
 
@@ -228,7 +260,10 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	peerId := rf.me
 
 	// apply remaining entries
-	go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
+	if !rf.killed() {
+		rf.wg.Add(1)
+		go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
+	}
 }
 
 // reconcileLog reconciles the local log with a batch of new entries starting at the given index.
@@ -250,7 +285,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	appendNeeded := false
 
-	remainingLen := len(rf.log) - startIndex
+	remainingLen := rf.getLastLogIndex() - startIndex + 1
 	lenArgsEntries := len(argsEntries)
 
 	/*
@@ -262,7 +297,7 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	*/
 	for index := range min(remainingLen, lenArgsEntries) {
 
-		entry := rf.log[startIndex+index]
+		entry := rf.log[rf.logAt(startIndex+index)]
 		argEntry := argsEntries[index]
 
 		if entry.Term == argEntry.Term {
@@ -271,11 +306,10 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 
 		// discard everything and append rest of logs from args
 		appendNeeded = true
-		rf.log = append(rf.log[:startIndex+index], argsEntries[index:]...)
-		lenArgsEntries = 0
+		rf.log = append(rf.log[:rf.logAt(startIndex+index)], argsEntries[index:]...)
 
 		DPrintf(
-			"[LogAppend] S%vT%v: updated from %v with %v. Now %v \n",
+			"[LogAppend] S%vT%v: updated via reconcile from %v with %v. Now %v \n",
 			rf.me,
 			rf.currentTerm,
 			startIndex+index,
@@ -302,13 +336,19 @@ func (rf *Raft) reconcileLog(startIndex int, argsEntries []LogEntry) bool {
 	}
 
 	// append possible remaining elements from args
-	if lenArgsEntries > remainingLen {
+	if !appendNeeded && lenArgsEntries > remainingLen {
 		appendNeeded = true
 
 		remainingElements := argsEntries[remainingLen:]
 		rf.log = append(rf.log, remainingElements...)
 
-		DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, remainingElements)
+		DPrintf(
+			"[LogAppend] S%vT%v: added via reconcile %v. Now: %v \n",
+			rf.me,
+			rf.currentTerm,
+			remainingElements,
+			rf.log,
+		)
 	}
 
 	return appendNeeded
@@ -320,6 +360,8 @@ func (rf *Raft) applyEntries(
 	currentTerm int,
 	commitIndex int,
 ) {
+	defer rf.wg.Done()
+
 	rf.applyMu.Lock()
 	defer rf.applyMu.Unlock()
 
@@ -330,7 +372,6 @@ func (rf *Raft) applyEntries(
 		rf.mu.Unlock()
 		return
 	}
-
 	rf.mu.Unlock()
 
 	/*
@@ -348,10 +389,10 @@ func (rf *Raft) applyEntries(
 			Do not keep sending if the server is NOT alive anymore.
 			new rfsrv is created, but goroutine from old server(this one) keeps
 			sending entries to the old applyCh.
-			applier of the old rfsrv only stops when the channel is closed. 
-			Nobody closes the old applyCh — Kill() just sets rf.dead = 1 and rs.raft = nil. 
-			So the old applier keeps reading from the old channel as long as old Raft goroutines 
-			keep sending to it.  
+			applier of the old rfsrv only stops when the channel is closed.
+			Nobody closes the old applyCh — Kill() just sets rf.dead = 1 and rs.raft = nil.
+			So the old applier keeps reading from the old channel as long as old Raft goroutines
+			keep sending to it.
 		*/
 		if rf.killed() {
 			return
@@ -366,16 +407,18 @@ func (rf *Raft) applyEntries(
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf(
-		"[LastAppliedUpdate] S%vT%v applied %v entries from %v \n",
-		peerId,
-		currentTerm,
-		entriesToBeApplied,
-		lastApplied,
-	)
-
+	if entriesToBeApplied != 1 && !entries[0].SnapshotValid {
+		DPrintf(
+			"[LastAppliedUpdate] S%vT%v applied %v entries from %v \n",
+			peerId,
+			currentTerm,
+			entriesToBeApplied,
+			lastApplied+1,
+		)
+	} else {
+		DPrintf("[LastAppliedUpdate] S%vT%v applied snapshot. Now: %v \n", peerId, currentTerm, commitIndex)
+	}
 	rf.lastApplied = commitIndex
-
 }
 
 // More documentation below at [0]
@@ -386,6 +429,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntry", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshotRPC", args, reply)
 	return ok
 }
 
@@ -415,12 +463,29 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	// rf.replicating[peer] = true
 
 	nextIndex := rf.nextIndex[peer]
+	if nextIndex <= rf.lastIncludedIndex {
+		// nextIndex is too old(prevLogIndex would also be too old), need to send InstallSnapshot RPC instead of AppendEntries
+		args := InstallSnapshotArgs{
+			Term:              term,
+			LeaderId:          leaderId,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			Data:              rf.snapshot,
+		}
+		reply := InstallSnapshotReply{}
+
+		rf.mu.Unlock()
+
+		rf.sendInstallSnapshot(peer, &args, &reply)
+		return
+	}
+
 	prevLogIndex := nextIndex - 1
-	prevLogTerm := rf.getLogTermForIndex(prevLogIndex)
+	prevLogTerm := rf.getLogTermForIndex(rf.logAt(prevLogIndex))
 
 	// NOTE: copy, DO NOT pass a pointer, so later it can be modified even if inside lock
 	// SOLUTION: deep copy: https://gemini.google.com/share/957cda6db728
-	entriesToBeSent := rf.log[nextIndex:]
+	entriesToBeSent := rf.log[rf.logAt(nextIndex):]
 	entries := make([]LogEntry, len(entriesToBeSent))
 	copy(entries, entriesToBeSent)
 
@@ -431,7 +496,6 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	ok := rf.sendAppendEntry(peer, &args, &reply)
 
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	// reset replicating flag
 	// rf.replicating[peer] = false
@@ -448,6 +512,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			3. Leader gets re-elected in term 7
 	*/
 	if rf.state != Leader || rf.currentTerm != term {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -457,8 +522,8 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			another goroutine will be scheduled to retry for the same peer, and so on
 			=> lots of goroutines trying to reach same peer
 		*/
-		// log.Printf("[HeartBeatError] %v did not respond to heartbeat from %v \n", peer, leaderId)
 
+		rf.mu.Unlock()
 		return
 	}
 
@@ -472,6 +537,7 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 
 		rf.persist()
 
+		rf.mu.Unlock()
 		return
 	}
 
@@ -482,12 +548,34 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	rf.lastQuorumAck = time.Now()
 
 	if !replySuccess {
+
+		if reply.NeedsInstallSnapshot || rf.logAt(reply.IndexOfFirstTermAtLeaderIndex) < 0 {
+
+			args := InstallSnapshotArgs{
+				Term:              term,
+				LeaderId:          leaderId,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm:  rf.lastIncludedTerm,
+				Data:              rf.snapshot,
+			}
+			reply := InstallSnapshotReply{}
+
+			rf.mu.Unlock()
+
+			rf.sendInstallSnapshot(peer, &args, &reply)
+
+			return
+		}
+
 		// Optimize nextIndex search and retry the AppendEntries RPC next time the ticker fires until logs match
-		oldNextIndex := rf.nextIndex[peer]
-		termAtFollowerFirstIndex := rf.log[reply.IndexOfFirstTermAtLeaderIndex].Term
+		oldNextIndex := nextIndex
+		termAtFollowerFirstIndex := rf.log[rf.logAt(reply.IndexOfFirstTermAtLeaderIndex)].Term
 		if termAtFollowerFirstIndex == reply.TermAtLeaderIndex {
 			rf.nextIndex[peer] = min(
-				rf.getLastIndexOfGivenTerm(reply.IndexOfFirstTermAtLeaderIndex, termAtFollowerFirstIndex)+1,
+				rf.getLastIndexOfGivenTerm(
+					rf.logAt(reply.IndexOfFirstTermAtLeaderIndex),
+					termAtFollowerFirstIndex,
+				)+1,
 				nextIndex-1,
 				rf.nextIndex[peer], // never go UP from current value
 			)
@@ -495,44 +583,69 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 			rf.nextIndex[peer] = min(reply.IndexOfFirstTermAtLeaderIndex, nextIndex-1, rf.nextIndex[peer])
 		}
 
-		// do not go further than the follower log len
+		// do not go further than the follower last index
 		if reply.OutOfBounds {
-			rf.nextIndex[peer] = min(rf.nextIndex[peer], reply.FollowerLogLen)
+			rf.nextIndex[peer] = min(
+				rf.nextIndex[peer],
+				reply.FollowerLastIndex+1,
+			)
 		}
+
+		// safety guard
+		rf.nextIndex[peer] = max(rf.nextIndex[peer], 1)
 
 		DPrintf(
 			"[LogBackoff] S%d T%d: S%d rejected AppendEntries at PrevLogIndex %d. Decrement NextIndex from %d to %d\n",
 			leaderId, term, peer, prevLogIndex, oldNextIndex, rf.nextIndex[peer])
 
+		rf.mu.Unlock()
 		return
 	}
 
 	lenEntries := len(entries)
-	if !replyAppendNeeded || lenEntries == 0 {
-		return
-	}
+
+	/*
+		On a successful reply, the follower's log matches the leader's up to
+		prevLogIndex + len(entries) — regardless of whether the follower had
+		to mutate its log (replyAppendNeeded). We must still update matchIndex
+		and nextIndex; otherwise the leader's view of the follower stays
+		frozen and commitIndex can never advance via this peer.
+	*/
 
 	// Update matchIndex to what we just sent
 	// Update nextIndex to matchIndex + 1
-	newMatchIndex := prevLogIndex + len(entries)
+	newMatchIndex := prevLogIndex + lenEntries
 	rf.matchIndex[peer] = max(rf.matchIndex[peer], newMatchIndex)
 
-	oldNextIndex := rf.nextIndex[peer]
+	oldNextIndex := nextIndex
 	rf.nextIndex[peer] = max(rf.nextIndex[peer], newMatchIndex+1)
 
-	DPrintf(
-		"[NextIndexUpdate]: S%v updated nextIndex from %v to %v because entries %v \n",
-		peer,
-		oldNextIndex,
-		rf.nextIndex[peer],
-		entries,
-	)
+	if !replyAppendNeeded || lenEntries == 0 {
+		DPrintf(
+			"[NoEntries] S%v->Peer:%v matchIndex=%v nextIndex=%v->%v (replyAppendNeeded:%v)\n",
+			rf.me,
+			peer,
+			rf.matchIndex[peer],
+			oldNextIndex,
+			rf.nextIndex[peer],
+			replyAppendNeeded,
+		)
+	} else {
+		DPrintf(
+			"[NextIndexUpdate]: updated nextIndex for S%v from %v to %v because entries %v \n",
+			peer,
+			oldNextIndex,
+			rf.nextIndex[peer],
+			entries,
+		)
+	}
 
 	maxCommitIndex := rf.getMaxCommittedIndex()
 
 	// update commitIndex if needed
 	// Section 5.4.2, only consider entries committed by count from current term
-	if rf.log[maxCommitIndex].Term == rf.currentTerm {
+	entryIndex := rf.logAt(maxCommitIndex)
+	if entryIndex >= 0 && rf.log[entryIndex].Term == rf.currentTerm {
 		oldCommitIndex := rf.commitIndex
 		rf.commitIndex = max(rf.commitIndex, maxCommitIndex)
 		if oldCommitIndex != rf.commitIndex {
@@ -547,10 +660,18 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	}
 
 	if rf.lastApplied == rf.commitIndex {
+		rf.mu.Unlock()
 		return
 	}
 
-	applyEntries := rf.prepareEntriesForApply(rf.lastApplied+1, rf.commitIndex)
+	/*
+		Snapshot is only applied on already applied Entries(FACT, check where Snapshot() is called)
+		Applying entries happens in a goroutine, so lastApplies might be not updated yet
+		but the entries are applied, so Snapshot was called on an entry older than lastApplied.
+		Trying to access entries that are not in the log anymore, they are in the
+		snapshot will get outOfBounds
+	*/
+	applyEntries := rf.prepareEntriesForApply(max(rf.lastApplied, rf.lastIncludedIndex)+1, rf.commitIndex)
 	// save commitIndex such that is protected while releasing lock
 	commitIndex := rf.commitIndex
 
@@ -558,16 +679,12 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 	peerId := rf.me
 
 	// apply remaining entries
-	go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
+	if !rf.killed() {
+		rf.wg.Add(1)
+		go rf.applyEntries(applyEntries, peerId, currentTerm, commitIndex)
+	}
 
-	DPrintf(
-		"[ReplicateSuccess] S%vT%v replicated %v on S%v \n",
-		leaderId,
-		term,
-		lenEntries, // rf.log[len(rf.log)-lenEntries:]
-		peer,
-	)
-
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) becomeLeader() {
@@ -703,6 +820,7 @@ func (rf *Raft) ticker() {
 			*/
 			if rf.timePassedSince(rf.lastQuorumAck) > time.Duration(2*rf.electionTimeout*int(time.Millisecond)) {
 				rf.stepDown(rf.currentTerm)
+				DPrintf("[StepDown] S%d T%d: (Partitioned leader stepping down)\n", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
 				continue
 			}
@@ -809,8 +927,6 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	term := -1
 	isLeader := false
 
-	// Your code here (3B).
-
 	if rf.killed() {
 		return index, term, isLeader
 	}
@@ -825,29 +941,28 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 	isLeader = true
 
 	// add entry to log. It needs to be quick, can't wait for the goroutine to execute
-	lenEntries := len(rf.log)
+	lastIndex := rf.getLastLogIndex()
 
-	entry := LogEntry{command, rf.currentTerm, lenEntries}
+	entry := LogEntry{command, rf.currentTerm, lastIndex + 1}
 	rf.log = append(rf.log, entry)
-	lenEntries += 1
+	lastIndex += 1
 
-	// log.Printf("[LogAppend] S%vT%v: added %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
-	DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, entry)
+	DPrintf("[LogAppend] S%vT%v: added via Start %v. Now: %v \n", rf.me, rf.currentTerm, entry, rf.log)
+	// DPrintf("[LogAppend] S%vT%v: added %v.\n", rf.me, rf.currentTerm, entry)
 
 	// persist to "disk" (disk = persister object)
 	rf.persist()
 
 	// Update nextIndex and matchIndex for itself, so when it sends AppendEntries to followers,
 	// it will know that it is already replicated on itself
-	rf.nextIndex[rf.me] = lenEntries
-	rf.matchIndex[rf.me] = lenEntries - 1
+	rf.nextIndex[rf.me] = lastIndex + 1
+	rf.matchIndex[rf.me] = lastIndex
 
 	term = rf.currentTerm
-	index = lenEntries - 1
 
 	go rf.handleReplicateCommand(term, rf.commitIndex, rf.me)
 
-	return index, term, isLeader
+	return lastIndex, term, isLeader
 }
 
 // save Raft's persistent state to stable storage,
@@ -860,12 +975,16 @@ func (rf *Raft) Start(command any) (int, int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-
 	w := new(bytes.Buffer)
 	enc := labgob.NewEncoder(w)
 
-	persistentRaftState := PersistentRaftState{Logs: rf.log, CurrentTerm: rf.currentTerm, VotedFor: rf.votedFor}
+	persistentRaftState := PersistentRaftState{
+		Logs:              rf.log,
+		CurrentTerm:       rf.currentTerm,
+		VotedFor:          rf.votedFor,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+	}
 
 	err := enc.Encode(&persistentRaftState)
 	if err != nil {
@@ -874,7 +993,7 @@ func (rf *Raft) persist() {
 
 	raftStateBytes := w.Bytes()
 
-	rf.persister.Save(raftStateBytes, nil)
+	rf.persister.Save(raftStateBytes, rf.snapshot)
 
 	// Example:
 	// w := new(bytes.Buffer)
@@ -886,9 +1005,14 @@ func (rf *Raft) persist() {
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshotData []byte) {
 	// on fresh start, no data to read
 	if data == nil || len(data) < 1 {
+
+		// dummy entry (in case log is not persisted, otherwise it is already included)
+		rf.log = append(rf.log, LogEntry{Term: rf.lastIncludedTerm, Index: rf.lastIncludedIndex})
+		// rf.replicating = make([]bool, len(peers))
+
 		DPrintf("S%vT%v has no data from persister\n", rf.me, rf.currentTerm)
 		return
 	}
@@ -910,6 +1034,15 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.log = raftStateStruct.Logs
 	rf.currentTerm = raftStateStruct.CurrentTerm
 	rf.votedFor = raftStateStruct.VotedFor
+
+	// snapshotting
+	rf.lastIncludedIndex = raftStateStruct.LastIncludedIndex
+	rf.lastIncludedTerm = raftStateStruct.LastIncludedTerm
+	rf.snapshot = snapshotData
+	// commitIndex >= lastIncludedIndex because snapshot is created on already applied entries,
+	// so it is safe to update commitIndex to lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -927,6 +1060,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+
+	// will be updated in readPersist if there is persisted state, otherwise = 0
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
@@ -941,15 +1076,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastHeartBeatSent = time.Now()
 	rf.heartBeatInterval = 100
 
-	rf.log = append(rf.log, LogEntry{Term: 0})
-
-	// rf.replicating = make([]bool, len(peers))
+	// offset from snapshotting
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 
 	rf.applyCh = applyCh
 	rf.applyMu = sync.Mutex{}
 
+	rf.wg = sync.WaitGroup{}
+
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
@@ -964,13 +1101,124 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
+func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	currentTerm := rf.currentTerm
+	resp.Term = currentTerm
+
+	if args.Term > currentTerm {
+		// step down and convert back to follower
+		rf.stepDown(args.Term)
+		rf.persist()
+	} else if args.Term < currentTerm {
+		// outdated snapshot, ignore
+		DPrintf("[InstallSnapshot Reject] S%vT%v args.Term:%v currentTerm:%v\n", rf.me, currentTerm, args.Term, currentTerm)
+		return
+	}
+
+	if rf.commitIndex > args.LastIncludedIndex {
+		// reject snapshot, already have applied entries that are not included in the snapshot since restart
+		DPrintf(
+			"[InstallSnapshot Reject] S%vT%v commitIndex:%v > args.LastIncludedIndex:%v\n",
+			rf.me,
+			currentTerm,
+			rf.commitIndex,
+			args.LastIncludedIndex,
+		)
+		return
+	}
+
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		// reject entry, current snapshot is more/as up to date than the one sent by the leader
+		DPrintf(
+			"[InstallSnapshot Reject] S%vT%v args.LastIncludedIndex:%v <= rf.lastIncludedIndex:%v\n",
+			rf.me,
+			currentTerm,
+			args.LastIncludedIndex,
+			rf.lastIncludedIndex,
+		)
+		return
+	}
+
+	// If existing log entry has same index and term as snapshot’s
+	// last included entry, retain log entries following it and reply
+	ok, index := rf.isEntryPresent(args.LastIncludedIndex, args.LastIncludedTerm)
+	if !ok {
+		// otherwise, discard the entire log
+		rf.log = []LogEntry{{Command: nil, Term: args.LastIncludedTerm, Index: args.LastIncludedIndex}}
+	} else {
+		rf.log = rf.log[index:]
+	}
+
+	DPrintf(
+		"[InstallSnapshot] S%vT%v discarded until %v NOW until: %v\n",
+		rf.me,
+		currentTerm,
+		args.LastIncludedIndex,
+		rf.getLastLogIndex(),
+	)
+
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.snapshot = args.Data
+
+	rf.persist()
+
+	applyEntries := make([]raftapi.ApplyMsg, 1)
+	applyEntries[0] = raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotIndex: args.LastIncludedIndex,
+		SnapshotTerm:  args.LastIncludedTerm,
+		CommandValid:  false,
+		Command:       nil,
+		CommandIndex:  args.LastIncludedIndex,
+	}
+
+	if !rf.killed() {
+		rf.wg.Add(1)
+		go rf.applyEntries(applyEntries, rf.me, currentTerm, args.LastIncludedIndex)
+	}
+}
+
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	/*
+		Remove logs up to and including index.
+		Keep first index the dummy entry(needs to have the correct term)
+		when looking at prevLogTerm
+	*/
+	if rf.logAt(index) < 0 {
+		DPrintf(
+			"[Snapshot Deny] S%vT%v - index %v. Already snapshotted until %v\n",
+			rf.me,
+			rf.currentTerm,
+			index,
+			rf.lastIncludedIndex,
+		)
+		return
+	}
+
+	rf.log = rf.log[rf.logAt(index):]
+
+	// reset rf.lastIncluded
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = rf.log[0].Term
+
+	// remove other older snapshots
+	rf.snapshot = snapshot
+
+	rf.persist()
+
+	DPrintf("[Snapshot] S%vT%v: index:%v log:%v \n", rf.me, rf.currentTerm, index, rf.log)
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -984,7 +1232,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
+	// used for building a happens-before relationship between WaitGroup Wait() and Add()
+	rf.mu.Lock()
+	rf.mu.Unlock()
+
+	rf.wg.Wait()
+
+	rf.applyCh <- raftapi.ApplyMsg{CommandValid: false}
 }
 
 func (rf *Raft) killed() bool {
