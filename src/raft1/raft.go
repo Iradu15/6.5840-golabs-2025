@@ -1120,8 +1120,7 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 	}
 
 	if rf.commitIndex > args.LastIncludedIndex {
-		// reject snapshot, already have committed entries that are not included in the snapshot
-		// since restart
+		// reject snapshot, already have applied entries that are not included in the snapshot since restart
 		DPrintf(
 			"[InstallSnapshot Reject] S%vT%v commitIndex:%v > args.LastIncludedIndex:%v\n",
 			rf.me,
@@ -1132,7 +1131,7 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 		return
 	}
 
-	if rf.snapshot != nil && args.LastIncludedIndex <= rf.lastIncludedIndex {
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
 		// reject entry, current snapshot is more/as up to date than the one sent by the leader
 		DPrintf(
 			"[InstallSnapshot Reject] S%vT%v args.LastIncludedIndex:%v <= rf.lastIncludedIndex:%v\n",
@@ -1179,11 +1178,9 @@ func (rf *Raft) InstallSnapshotRPC(args *InstallSnapshotArgs, resp *InstallSnaps
 		CommandIndex:  args.LastIncludedIndex,
 	}
 
-	peerId := rf.me
-
 	if !rf.killed() {
 		rf.wg.Add(1)
-		go rf.applyEntries(applyEntries, peerId, currentTerm, args.LastIncludedIndex)
+		go rf.applyEntries(applyEntries, rf.me, currentTerm, args.LastIncludedIndex)
 	}
 }
 
