@@ -260,7 +260,6 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	peerId := rf.me
 
 	// apply remaining entries
-	
 	if !rf.killed() {
 		rf.wg.Add(1)
 		go rf.applyEntries(entries, peerId, currentTerm, commitIndex)
@@ -1233,8 +1232,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	
-	// used for building a happens-before relationship between WaitGroup Wait() and Add() 
+	// used for building a happens-before relationship between WaitGroup Wait() and Add()
 	rf.mu.Lock()
 	rf.mu.Unlock()
 
