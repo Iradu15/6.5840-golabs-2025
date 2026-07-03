@@ -854,8 +854,11 @@ func (rf *Raft) ticker() {
 		if rf.timePassedSince(rf.lastHeartBeat) > time.Duration(rf.electionTimeout*int(time.Millisecond)) {
 			/*
 				update timer here (not in startElection) because go goroutine() schedules it,
-				not starts it, what if queue is big, the goroutine might not start and the election
-				timeout passes again and the timer is not updated in the goroutine
+				not starts it. What if queue is big, the goroutine might not start and the election
+				timeout passes again and the timer is not updated in the goroutine.
+				Example: it passes this if, goes into next ticker loop until the goroutine
+				is scheduled and starts the election because timer was not reset, when in fact is should NOT
+				have started an election. 
 			*/
 			rf.lastHeartBeat = time.Now()
 			rf.currentTerm += 1
@@ -994,14 +997,6 @@ func (rf *Raft) persist() {
 	raftStateBytes := w.Bytes()
 
 	rf.persister.Save(raftStateBytes, rf.snapshot)
-
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -1231,9 +1226,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
 	// used for building a happens-before relationship between WaitGroup Wait() and Add()
 	rf.mu.Lock()
+	atomic.StoreInt32(&rf.dead, 1)
 	rf.mu.Unlock()
 
 	rf.wg.Wait()
