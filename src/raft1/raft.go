@@ -57,15 +57,6 @@ type Raft struct {
 	// replicating []bool
 
 	/*
-		used such that a partitioned node step down by itself.
-		Caveat:
-			if at least one node responds to leader in same term,
-			considers it's still leader, but would need a majority
-			in fact, not only one: [oldLeader, s1], [s2....sn, n >= 3]
-	*/
-	lastQuorumAck time.Time
-
-	/*
 		Used for exclusive applying while not holding the primary lock.
 		Primary lock should be freed while applying because there might not be
 		someone at the other edge of the channel to read
@@ -541,12 +532,6 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 		return
 	}
 
-	/*
-		Reset quorum timer due to response from peer.
-		No point in updating if step down (after replyTerm > term)
-	*/
-	rf.lastQuorumAck = time.Now()
-
 	if !replySuccess {
 
 		if reply.NeedsInstallSnapshot || rf.logAt(reply.IndexOfFirstTermAtLeaderIndex) < 0 {
@@ -690,9 +675,6 @@ func (rf *Raft) handleAppendEntry(peer int, term int, leaderId int, leaderCommit
 func (rf *Raft) becomeLeader() {
 	DPrintf("[Leader] S%d T%d: Won election and became Leader \n", rf.me, rf.currentTerm)
 
-	// reset quorum timer
-	rf.lastQuorumAck = time.Now()
-
 	rf.changeState(Leader)
 
 	// reinitialize arrays Fig2: State
@@ -812,18 +794,6 @@ func (rf *Raft) ticker() {
 
 		if rf.state == Leader {
 			currentTerm := rf.currentTerm
-
-			/*
-				Optimization such that partitioned leader steps down by itself.
-				It is safe to step down to same term because meanwhile the other servers
-				started an election and incremented the term
-			*/
-			if rf.timePassedSince(rf.lastQuorumAck) > time.Duration(2*rf.electionTimeout*int(time.Millisecond)) {
-				rf.stepDown(rf.currentTerm)
-				DPrintf("[StepDown] S%d T%d: (Partitioned leader stepping down)\n", rf.me, rf.currentTerm)
-				rf.mu.Unlock()
-				continue
-			}
 
 			// needed not to spam with a lot of goroutines that send heartbeat
 			if rf.timePassedSince(rf.lastHeartBeatSent) > time.Duration(rf.heartBeatInterval*int(time.Millisecond)) {
